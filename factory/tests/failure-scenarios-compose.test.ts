@@ -1,4 +1,4 @@
-// Server-side failure scenarios that need real containers (testing.md, "Failure scenarios": F3, F4, F14), package 61.
+// Server-side failure scenarios that need real containers (testing.md, "Failure scenarios": F3, F4, F5 long cut, F14), package 61.
 // The stack is the production compose stack (Postgres, the schema step, the Temporal server), brought up the way
 // tests/machine-liveness-schedule.test.ts does it, with its own project name. The control activities are the real ones on the
 // real database; the machine side is fake activities on queue `machine-m1`. Everything runs in real time: a restart is a
@@ -57,6 +57,7 @@ type Handle = WorkflowHandle;
 describe("failure scenarios on the real stack", { concurrency: false }, () => {
 	const cleanups = new Cleanups();
 	let info: SharedStackInfo;
+	let serverAddress = "";
 	let temporalContainer = "";
 	let postgresContainer = "";
 	let connection: Connection;
@@ -239,6 +240,7 @@ describe("failure scenarios on the real stack", { concurrency: false }, () => {
 		info = await newBenchStackInfo(cleanups);
 		const port = await freePort();
 		const address = `127.0.0.1:${port}`;
+		serverAddress = address;
 		const env = { ...stackEnv(info), AF_TEMPORAL_PORT: String(port) };
 		try {
 			await cleanups.track(runChecked("docker", stackArgs(info, "up", "-d", "temporal"), { env }));
@@ -381,6 +383,78 @@ describe("failure scenarios on the real stack", { concurrency: false }, () => {
 			});
 		} finally {
 			await api.stop();
+		}
+	});
+
+	it("F5 a long cut: every attempt of the call in flight times out by heartbeat, the retries run out, the task is BLOCKED execution", { timeout: TEST_MS }, async () => {
+		// The real server, not the time-skipping bench: the Java test server never times out attempt 2 after attempt 1 (see the
+		// comment in failure-scenarios-bench.test.ts), so the default retry.infra.maxAttempts (3) is checked only here.
+		// Heartbeat timeout of MonitorExecution: 5 s instead of the file's 600 s. Source: the attempts are real time (3 attempts,
+		// back-offs 1 s and 2 s of the default retry policy, about 20 s in all); 5 s is far below start-to-close (600 s), so a
+		// timeout that ends an attempt can only be the heartbeat one. Restored below: F3 holds MonitorExecution without heartbeats.
+		const HEARTBEAT_SECONDS = 5;
+		const MAX_ATTEMPTS = 3;
+		await migratorRepo.settings.set("act.MonitorExecution.H", HEARTBEAT_SECONDS, null);
+		try {
+			const h = await harness();
+			const started: { attempt: number; at: number }[] = [];
+			const hang = gate();
+			// The machine process is cut: the call starts, never heartbeats and never answers; every retry starts and hangs the same way.
+			const cut = (): Record<string, (input: never) => Promise<unknown>> => ({
+				...machineActivities(h),
+				MonitorExecution: async () => {
+					started.push({ attempt: Context.current().info.attempt, at: realClock.now() });
+					h.seen.push({ name: "MonitorExecution", db: await dbStatus(h.taskId) });
+					await hang.promise;
+					return { state: "running", logOffset: 0 };
+				},
+			});
+			// The machine worker is its own process: it owns its connection to the server and closes it when it is cut.
+			const machineConnection = await NativeConnection.connect({ address: serverAddress });
+			try {
+				const control = await Worker.create({
+					connection: nativeConnection, namespace: NAMESPACE, taskQueue: CONTROL_QUEUE, workflowBundle: await controlBundle(), activities: controlActivities(h),
+					enableNonLocalActivities: false, maxCachedWorkflows: 0,
+				});
+				const machine = await Worker.create({ connection: machineConnection, namespace: NAMESPACE, taskQueue: h.fakes.PrepareWorkspace.queue!, activities: cut() });
+				await control.runUntil(machine.runUntil((async () => {
+					try {
+						const handle = await startLifecycle(h);
+						const state = await until(handle, "blocked", (s) => s.status === "BLOCKED", TEST_MS - 60_000);
+						assert.equal(state.blockKind, "execution", JSON.stringify({ block: state.blockKind }));
+
+						// Every attempt ran on the machine and ended by the heartbeat timeout: it was started again after at least the heartbeat
+						// timeout, and long before start-to-close (600 s) could have ended it.
+						assert.equal(started.length, MAX_ATTEMPTS, JSON.stringify(started));
+						assert.deepEqual(started.map((s) => s.attempt), [1, 2, 3]);
+						for (let i = 1; i < started.length; i += 1) {
+							const gapMs = started[i]!.at - started[i - 1]!.at;
+							assert.ok(gapMs >= HEARTBEAT_SECONDS * 1000 && gapMs < TIMEOUT_SECONDS * 1000 / 2, `attempt ${i + 1} started ${gapMs} ms after the previous one`);
+						}
+						const events = (await handle.fetchHistory()).events ?? [];
+						const timedOut = events.find((e) => e.activityTaskTimedOutEventAttributes !== null && e.activityTaskTimedOutEventAttributes !== undefined);
+						const failure = timedOut?.activityTaskTimedOutEventAttributes?.failure?.timeoutFailureInfo;
+						// Enum numbers of temporal.api.enums.v1 (@temporalio/proto is not a direct dependency): TimeoutType 4 = HEARTBEAT,
+						// RetryState 4 = MAXIMUM_ATTEMPTS_REACHED.
+						assert.equal(failure?.timeoutType, 4, "the last attempt ended by the heartbeat timeout");
+						assert.equal(timedOut?.activityTaskTimedOutEventAttributes?.retryState, 4, "the retries ran out");
+
+						// The database row agrees with the workflow, and nothing new started or was collected while cut.
+						const row = (await migratorClient<{ status: string; block_kind: string | null }[]>`SELECT status, block_kind FROM tasks WHERE id = ${h.taskId}`)[0]!;
+						assert.deepEqual({ status: row.status, kind: row.block_kind }, { status: "BLOCKED", kind: "execution" });
+						assert.equal(h.fakes.StartAgentExecution.executed(), 1, "no new start while cut");
+						assert.equal(h.fakes.CollectResults.executed(), 0);
+						assert.equal(h.fakes.UploadResults.executed(), 0);
+					} finally {
+						hang.open();
+						for (const abort of h.aborts) abort.abort(new Error("test ended"));
+					}
+				})()));
+			} finally {
+				await machineConnection.close();
+			}
+		} finally {
+			await migratorRepo.settings.set("act.MonitorExecution.H", TIMEOUT_SECONDS, null);
 		}
 	});
 

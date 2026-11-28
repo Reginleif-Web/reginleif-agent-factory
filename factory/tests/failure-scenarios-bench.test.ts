@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import { after, before, describe, test } from "node:test";
 import { drizzle } from "drizzle-orm/postgres-js";
 import { ApplicationFailure, Context } from "@temporalio/activity";
-import { GracefulShutdownPeriodExpiredError, Worker } from "@temporalio/worker";
+import { GracefulShutdownPeriodExpiredError, NativeConnection, Worker } from "@temporalio/worker";
 import type { TestWorkflowEnvironment } from "@temporalio/testing";
 import type { WorkflowHandle } from "@temporalio/client";
 import { recordDecision } from "../api/decisions.ts";
@@ -180,12 +180,24 @@ const withControl = async <T>(h: Harness, body: () => Promise<T>): Promise<T> =>
 /** How long a worker that is told to stop may take before it is terminated as a killed process would be (real ms, no fake clock). */
 const KILL_AFTER_MS = 300;
 
+/** The connection each machine worker owns: a machine is its own process, so cutting it must close its own connection to the server. */
+const machineConnections = new WeakMap<Worker, NativeConnection>();
+
 /** A machine worker on queue `machine-m1`; with a ghost it has one activity slot, which the ghost holds. */
-const createMachine = (h: Harness, options: MachineOptions): Promise<Worker> =>
-	Worker.create({
-		connection: env.nativeConnection, taskQueue: h.fakes.PrepareWorkspace.queue!, activities: machineActivities(h, options),
+const createMachine = async (h: Harness, options: MachineOptions): Promise<Worker> => {
+	const connection = await NativeConnection.connect({ address: env.address });
+	const worker = await Worker.create({
+		connection, taskQueue: h.fakes.PrepareWorkspace.queue!, activities: machineActivities(h, options),
 		...(options.ghost ? { maxConcurrentActivityTaskExecutions: 1, shutdownForceTime: KILL_AFTER_MS } : {}),
 	});
+	machineConnections.set(worker, connection);
+	return worker;
+};
+
+/** Closes the connection of a stopped machine worker: nothing of it polls or answers the server any more. */
+const disconnectMachine = async (worker: Worker): Promise<void> => {
+	await machineConnections.get(worker)?.close();
+};
 
 const withMachine = async <T>(h: Harness, options: MachineOptions, body: () => Promise<T>): Promise<T> => {
 	const worker = await createMachine(h, options);
@@ -194,6 +206,7 @@ const withMachine = async <T>(h: Harness, options: MachineOptions, body: () => P
 	} finally {
 		h.ghostRelease();
 		for (const abort of h.aborts) abort.abort(new Error("test ended"));
+		await disconnectMachine(worker);
 	}
 };
 
@@ -210,6 +223,7 @@ const withDyingMachine = async <T>(h: Harness, body: (die: () => Promise<void>) 
 		worker.shutdown();
 		const outcome = await running;
 		assert.ok(outcome instanceof GracefulShutdownPeriodExpiredError, `the worker was terminated, not drained: ${String(outcome)}`);
+		await disconnectMachine(worker);
 	};
 	try {
 		return await body(die);
@@ -220,6 +234,7 @@ const withDyingMachine = async <T>(h: Harness, body: (die: () => Promise<void>) 
 			h.ghostRelease();
 			worker.shutdown();
 			await running;
+			await disconnectMachine(worker);
 		}
 		for (const abort of h.aborts) abort.abort(new Error("test ended"));
 	}
@@ -420,4 +435,7 @@ describe("F5 the worker is cut from the server", () => {
 		});
 	});
 
+	// The long cut (every attempt of the call in flight times out by heartbeat, the retries run out, BLOCKED execution) is not here:
+	// the pinned Java time-skipping test server never times out attempt 2 of an activity after attempt 1 timed out, so the default
+	// retry.infra.maxAttempts cannot be checked on it. It is tested on the real server in failure-scenarios-compose.test.ts (F5).
 });
