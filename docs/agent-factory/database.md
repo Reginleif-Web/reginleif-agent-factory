@@ -150,13 +150,13 @@ Nine more tables (49 in all with the rights tables), design in [personnel.md](pe
 `run_checks`, `right_grants`, `roles` and `audit_log` and copy nothing from them: a fact, an assessment or an incident
 names its source rows by id. A replacement is not a table: it is the end of one `position_assignments` row and the start
 of the next. No agent token has any route to these tables (a profile is a view over them, written by components other
-than the agent). Migration 0012 creates the first four, 0013 the other five.
+than the agent). Migration 0013 creates the first four, 0014 the other five.
 
 | Table | Columns |
 |---|---|
-| `agent_versions` | One row per configuration of an agent: `id`; `agent_id` FK; `version int`, unique with `agent_id`, contiguous from 1; `provider`, `adapter_type`, `model`, `instructions_hash`, `tools jsonb` (no secrets); `created_at`. Immutable. A change of the model, the instructions or the tools in `agents.configuration` inserts a new row in the same transaction; `task_runs.agent_version_id` FK nullable (an expand step in 0012) names the one a run used. A new version starts with no facts (personnel.md, who is an agent). |
+| `agent_versions` | One row per configuration of an agent: `id`; `agent_id` FK; `version int`, unique with `agent_id`, contiguous from 1; `provider`, `adapter_type`, `model`, `instructions_hash`, `tools jsonb` (no secrets); `created_at`. Immutable. A change of the model, the instructions or the tools in `agents.configuration` inserts a new row in the same transaction; `task_runs.agent_version_id` FK nullable (an expand step in 0013) names the one a run used. A new version starts with no facts (personnel.md, who is an agent). |
 | `positions` | A post of the factory: `id`; `name text` unique among live rows; `kind` enum (`chief_engineer`, `division_head`, `executor`); `parent_position_id` FK nullable (the superior; null only for the chief engineer); `role_id` FK nullable (the `roles` row family that gives its rights, never a right written here); `created_at`; `retired_at`. A position is never deleted. At most one live `chief_engineer` row (partial unique index). |
-| `position_assignments` | Who holds a position and for how long, the history of replacements: `id`; `position_id` FK; `agent_id` FK; `agent_version_id` FK; `started_at`; `ended_at` nullable; `end_reason` enum nullable (`replaced`, `measure`, `retired`, `owner`); `measure_id` FK nullable (0013, added by `alter table`; required for `measure`); `decided_by` (actor type and id). Unique `(position_id)` where `ended_at` is empty: one holder per position. Immutable except the ending columns, set once. A replacement ends one row and inserts the next in one transaction; nothing of the replaced agent is deleted. |
+| `position_assignments` | Who holds a position and for how long, the history of replacements: `id`; `position_id` FK; `agent_id` FK; `agent_version_id` FK; `started_at`; `ended_at` nullable; `end_reason` enum nullable (`replaced`, `measure`, `retired`, `owner`); `measure_id` FK nullable (0014, added by `alter table`; required for `measure`); `decided_by` (actor type and id). Unique `(position_id)` where `ended_at` is empty: one holder per position. Immutable except the ending columns, set once. A replacement ends one row and inserts the next in one transaction; nothing of the replaced agent is deleted. |
 | `personnel_facts` | One fact from a source row: `id`; `agent_id` FK; `agent_version_id` FK; `task_id` FK; `run_id` FK nullable; `position_id` FK nullable; `criterion` enum (`quality`, `autonomy`, `regulation`, `reliability`, `resources`, `cooperation`); `kind text` (a value of the list in code); `value numeric`; `difficulty` enum (`low`, `medium`, `high`); `rights_ref jsonb` (the grants and role rights in force); `source_type` enum (`run_check`, `task_review`, `review_finding_outcome`, `task_run`, `task_event`, `right_request`, `registry_inquiry`, `owner_question`); `source_id uuid`; `created_at`. Unique `(source_type, source_id, kind)`: one event, one fact. Immutable. The writer is a server component (`af_control`), never a route; `check (source_type <> 'agent_report')` has no counterpart because no such source exists. |
 | `assessments` | A computed score: `id`; `agent_id` FK; `agent_version_id` FK; `position_id` FK nullable; `period_start`, `period_end`; `weights jsonb` (the weights used); `criteria jsonb` (per criterion: score or `not_enough_data`, the count of facts, the fact ids sampled); `total numeric` nullable (null when too few facts); `category` enum nullable; `evaluator_provider text` (for the chief engineer: another provider than its own, `check` by trigger); `mode` enum (`observe`, `enforce`); `created_at`. Immutable. Recomputed from `personnel_facts`, never edited. |
 | `incidents` | `id`; `agent_id` FK; `agent_version_id` FK; `task_id` FK nullable; `run_id` FK nullable; `event_key text` unique (one event, one incident); `class` enum (`minor`, `substantial`, `critical`); `clause_id text`; `evidence jsonb` (ids of runs, artifacts, checks and audit rows); `classified_by` (the code, plus the independent reviewer's `qualification_reviews` id, set once when the review exists, since the review names the incident and the incident row comes first; the trigger of the one rule for every review checks it: the same incident, verdict `confirmed`, not the author. The critical reaction never waits for it); `agent_explanation_id` FK nullable (the agent's answer, stored as data); `reaction` enum nullable (`run_stopped`, `rights_closed`, `owner_notified` as a set, for `critical`); `suspension_id` FK `rights_suspensions` nullable (the suspension the critical reaction wrote, found by the same `event_key`; the reaction runs from phase 4 and needs no incident row, which exists from phase 8, so a suspension written before has its audit row and the incident is attached to it later; required for a `critical` row whose reaction ran); `status` enum (`open`, `investigated`, `closed`); `created_at`; `status_changed_at`. A conduct on the protected list never inserts a row: the code refuses with `protected_conduct` and writes an `audit_log` row. Content is immutable; only the status columns change, under audit. |
@@ -173,8 +173,8 @@ Settings (Table `settings`, global): `personnel.mode` (`observe` or `enforce`, d
 term of a limit, the outage and limit terms of the chief engineer's replacement). All are starting values calibrated on
 real data.
 
-Creation order. Every key target exists in 0001 to 0010. In 0012: `agent_versions`, `positions`, `position_assignments`,
-`personnel_facts`, then the nullable `task_runs.agent_version_id` by `alter table`. In 0013: `assessments`, `incidents`,
+Creation order. Every key target exists in 0001 to 0010. In 0013: `agent_versions`, `positions`, `position_assignments`,
+`personnel_facts`, then the nullable `task_runs.agent_version_id` by `alter table`. In 0014: `assessments`, `incidents`,
 `qualification_reviews`, `corrective_actions`, `measures`, then `position_assignments.measure_id` by `alter table`.
 
 ## Client tables
@@ -277,7 +277,7 @@ Constraints (the design decisions; each has a check in [testing.md](testing.md))
   qualification is `not null`; the `QUALIFIED` row names its `REVIEW_PENDING` row, and the checks of Table 2 run at its
   insert (`evidence_missing`, `qualification_invalid`, `review_invalid`, and `stage_exit_invalid` for the exit;
   `robot-qualification`, `robot-evidence`). The robotics review table is used, so that this migration does not depend on
-  0013's `qualification_reviews`.
+  0014's `qualification_reviews`.
 - **An admission is bound to one experiment and one lease:** `robot_admissions.experiment_id` is unique; `plan_hash`
   equals the `content_hash` of its final `experiment_plan` review; the Admission rows of Table 2 give the insert checks and
   the `used_at` set in the lease insert. A trigger refuses a command row whose `admission_id` is expired, not the lease's,
@@ -301,7 +301,7 @@ Constraints (the design decisions; each has a check in [testing.md](testing.md))
   second press and the consumption are the Start confirmation rows of Table 2 (`robot-safety`, `robot-owner-load`).
 
 **Migration order.** Forward-only numbers are given by build order, not by this document. The personnel migration of phase
-8 (0013) and the robotics migration are independent: each depends only on migrations 0001 to 0012, and whichever is built
+8 (0014) and the robotics migration are independent: each depends only on migrations 0001 to 0013, and whichever is built
 first takes the next free number, the other the one after it. The robotics migration adds these eighteen tables (the join
 tables count as part of `robot_qualifications`, `robot_reviews` and `robot_stages`; the owner's confirmation is a
 `confirmations` row, whose five `robot_start` columns, its `reasons` column and the check on them this migration adds by `alter table confirmations`, not a table): `robot_zones`, `robots`, `robot_configurations`,
@@ -310,7 +310,7 @@ tables count as part of `robot_qualifications`, `robot_reviews` and `robot_stage
 `robot_commands`, `robot_receipts`, `robot_safety_events`, `robot_maintenance`, plus the four
 `block_kind` values and the `task_transitions` rows for them. It is built only when robotics starts, so `migration-order`
 covers it only then. Creation order is the list above; every target (`agents`, `tasks`, `task_runs`, `task_artifacts`)
-exists since 0001 to 0004. It refers to nothing in 0013.
+exists since 0001 to 0004. It refers to nothing in 0014.
 
 ## Revisions and the version of a row
 
@@ -332,7 +332,8 @@ exists since 0001 to 0004. It refers to nothing in 0013.
   `usage_limit`, `agent_question` to ASSIGNED; `check_environment` to VERIFYING; `rework_limit` to REWORK_REQUIRED; the four physical kinds of D34 (`safe_stop`,
   `physical_unknown`, `maintenance`, `quarantine`) to ASSIGNED, only after a new check and a new permission to move, never
   as a retry of the physical operation (temporal.md, BLOCKED kinds). The table `task_transitions` carries these rows and
-  the trigger checks the pair of kind and target.
+  the trigger checks the pair of kind and target. Only the progress exit (resolve) is decided by the kind: cancel
+  (CANCELLED, CANCELLING), pause (PAUSED) and revise (PLANNING) leave BLOCKED whatever its kind (migration 0011).
 - **Block handler.** `block_handler` says who the block waits for and is set with the kind when the task enters BLOCKED,
   by a rule in code, never by an agent: `scope` and `agent_question` enter with `owner`; the other five kinds
   (`dependency`, `execution`, `usage_limit`, `check_environment`, `rework_limit`) enter with `chief_engineer`, except when
@@ -683,10 +684,11 @@ poll, takes the `pending` rows of `poll_answer_requests` and confirms or refuses
   | 0007 | the rights tables (`roles`, `role_assignments`, `right_requests`, `right_answers`, `rights_suspensions`, `right_grants`: 6) point to `tasks`, `owners`, `agents`, `confirmations`, `task_runs`, `registry_inquiries`, `api_tokens`; `right_grants.suspension_id` points to `rights_suspensions`; `registry_records` gets `right` and `consumed_at` and the kind `permission`; `task_runs` gets the value `chief_engineer` of `role`, `participant`, `role_assignment_id` and `profile_rights`; `right_answers` carries `owner_act_ref` (the owner's own act of an owner grant); the outbox kind `stop_run`; the project `_factory` and its standing task | all targets exist since 0001 to 0006; `roles` first, then `role_assignments`, `right_requests`, `right_answers`, `rights_suspensions`, and `right_grants` last (it points to the suspension); the `task_runs` columns (`profile_rights` included) are nullable (an expand step) and `role_assignment_id` is added by an `alter table` after `role_assignments`; phase 2 (the use by the chief engineer comes in phase 4, the critical reaction that writes `rights_suspensions` in phase 4) |
   | 0009 | initial revision for the seeded `_factory` standing task | the task and revision table exist since 0007 and 0003; phase 2 |
   | 0010 | no table: the grant of the insert on `registry_inquiry_results` to `af_control` and its guard trigger `af_0010_result_insert` | the target exists since 0006; the trigger and the grant are in one file with no key to order; phase 3 |
-  | 0011 | `gpu_leases` to `workers.machine_id`, `task_runs.execution_id`, `tasks` | all exist since 0001, 0002, 0004; phase 5 |
-  | 0012 | the personnel tables of phase 5 (`agent_versions`, `positions`, `position_assignments`, `personnel_facts`) point to `agents`, `tasks`, `task_runs`, `roles`; `task_runs.agent_version_id` points to `agent_versions` | all targets exist since 0001 to 0010; `agent_versions` first, then `positions`, `position_assignments`, `personnel_facts`; `task_runs.agent_version_id` is nullable (an expand step) and is added by an `alter table` after `agent_versions`; phase 5 |
-  | 0013 | the personnel tables of phase 8 (`assessments`, `incidents`, `qualification_reviews`, `corrective_actions`, `measures`) point to the 0012 tables, `task_reviews`, `task_runs`; `position_assignments.measure_id` points to `measures`; `incidents.suspension_id` points to `rights_suspensions` (0007) | `assessments`, `incidents`, `qualification_reviews`, `corrective_actions`, `measures` in this order (a measure needs the other three); `position_assignments.measure_id` is nullable and added by an `alter table` after `measures`; `incidents.suspension_id` is an ordinary nullable key, the target exists since 0007; phase 8 |
-  | next free number | the robotics tables (D34, 18 tables, not counted in the 55) point to `agents`, `tasks`, `task_runs`, `task_artifacts`; the four physical `block_kind` values and their `task_transitions` rows | all targets exist since 0001 to 0004; order as in Robotics tables; independent of 0013 (each depends only on 0001 to 0012, the one built first takes the next free number, see Robotics tables); built when robotics starts |
+  | 0011 | no table: two `task_transitions` rows, ASSIGNED to BLOCKED and ASSIGNED to FAILED | no key; the rows are data in one file; phase 3 |
+  | 0012 | `gpu_leases` to `workers.machine_id`, `task_runs.execution_id`, `tasks` | all exist since 0001, 0002, 0004; phase 5 |
+  | 0013 | the personnel tables of phase 5 (`agent_versions`, `positions`, `position_assignments`, `personnel_facts`) point to `agents`, `tasks`, `task_runs`, `roles`; `task_runs.agent_version_id` points to `agent_versions` | all targets exist since 0001 to 0010; `agent_versions` first, then `positions`, `position_assignments`, `personnel_facts`; `task_runs.agent_version_id` is nullable (an expand step) and is added by an `alter table` after `agent_versions`; phase 5 |
+  | 0014 | the personnel tables of phase 8 (`assessments`, `incidents`, `qualification_reviews`, `corrective_actions`, `measures`) point to the 0013 tables, `task_reviews`, `task_runs`; `position_assignments.measure_id` points to `measures`; `incidents.suspension_id` points to `rights_suspensions` (0007) | `assessments`, `incidents`, `qualification_reviews`, `corrective_actions`, `measures` in this order (a measure needs the other three); `position_assignments.measure_id` is nullable and added by an `alter table` after `measures`; `incidents.suspension_id` is an ordinary nullable key, the target exists since 0007; phase 8 |
+  | next free number | the robotics tables (D34, 18 tables, not counted in the 55) point to `agents`, `tasks`, `task_runs`, `task_artifacts`; the four physical `block_kind` values and their `task_transitions` rows | all targets exist since 0001 to 0004; order as in Robotics tables; independent of 0014 (each depends only on 0001 to 0013, the one built first takes the next free number, see Robotics tables); built when robotics starts |
 
   A test applies the migrations one by one to an empty database and checks the schema after each file; it fails when a
   table of this document is in no file or in two (`migration-order`).

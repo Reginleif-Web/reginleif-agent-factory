@@ -22,13 +22,15 @@ type Row = readonly [Cell, Cell, Cell, Cell, Cell, Cell, Cell, Cell, Cell, Cell,
 // Cells in the column order of UPDATE_KINDS (the order of the table in temporal.md).
 const row = (cells: Row): Readonly<Record<UpdateKind, Cell>> => Object.fromEntries(UPDATE_KINDS.map((kind, index) => [kind, cells[index]])) as Record<UpdateKind, Cell>;
 
-const beforePlanning = row(["R", "R", "R", "->CANCELLED", "->PAUSED", "R", "->PLANNING", "note", "prio", "R", "R", "R"]);
+const created = row(["R", "R", "R", "->CANCELLED", "->PAUSED", "R", "->PLANNING", "note", "prio", "R", "R", "R"]);
+// architecture.md has no READY->PLANNING or WAITING_DEPENDENCIES->PLANNING: a revise there is stored and taken at the start.
+const beforeStart = row(["R", "R", "R", "->CANCELLED", "->PAUSED", "R", "note", "note", "prio", "R", "R", "R"]);
 const closed = row(["X", "X", "X", "X", "X", "X", "X", "X", "X", "X", "X", "X"]);
 
 export const MATRIX: Readonly<Record<TaskStatus, Readonly<Record<UpdateKind, Cell>>>> = {
-	CREATED: beforePlanning,
-	READY: beforePlanning,
-	WAITING_DEPENDENCIES: beforePlanning,
+	CREATED: created,
+	READY: beforeStart,
+	WAITING_DEPENDENCIES: beforeStart,
 	PLANNING: row(["R", "R", "R", "L", "P", "unflag", "stop->PLANNING", "note", "prio", "R", "R", "R"]),
 	ASSIGNED: row(["R", "R", "R", "L", "P", "unflag", "note", "note", "prio", "R", "R", "allow"]),
 	RUNNING: row(["R", "R", "R", "->CANCELLING", "flag", "unflag", "stop->ASSIGNED", "note", "prioLater", "R", "R", "R"]),
@@ -57,7 +59,7 @@ export const FORWARD_EXITS: Readonly<Record<TaskStatus, readonly TaskStatus[]>> 
 	PLANNING: ["READY", "BLOCKED", "FAILED"],
 	READY: ["WAITING_DEPENDENCIES", "ASSIGNED"],
 	WAITING_DEPENDENCIES: ["ASSIGNED", "BLOCKED"],
-	ASSIGNED: ["RUNNING"],
+	ASSIGNED: ["RUNNING", "BLOCKED", "FAILED"],
 	RUNNING: ["VERIFYING", "ASSIGNED", "BLOCKED", "FAILED"],
 	VERIFYING: ["AWAITING_APPROVAL", "REWORK_REQUIRED", "BLOCKED", "FAILED"],
 	AWAITING_APPROVAL: [],
@@ -140,6 +142,10 @@ export const applyCell = (state: TaskState, kind: UpdateKind, cell: Cell, payloa
 			return { state: { ...base, allowedAgents: allowed, reselectAgent: true }, effect: "agent_allowed" };
 		}
 		case "resolve": {
+			// call_owner (temporal.md "Choices by kind"): the status stays, the handler becomes the owner; a later engineer resolution is `block_handled`.
+			if (payloadField(payload, "choice") === "call_owner" && base.blockKind !== null && base.blockHandler === "chief_engineer") {
+				return { state: { ...base, blockHandler: "owner" }, effect: "owner_called" };
+			}
 			const exit = base.revisionStored ? "PLANNING" : base.blockKind === null ? "PLANNING" : BLOCK_KINDS[base.blockKind].exit;
 			return { state: moveTo(base, exit), effect: "moved" };
 		}
@@ -178,6 +184,7 @@ export const memoryRefusal = (state: TaskState, kind: UpdateKind, read: Decision
 		if (typeof asked === "string" && (!isBlockKind(asked) || asked !== state.blockKind)) return "block_kind_mismatch";
 	}
 	if (REVISION_KINDS.includes(kind) && read.revisionNumber !== state.revision) return "revision_stale";
+	if (kind === "resolve_block") return resolveRefusal(state, read);
 	return payloadRefusal(kind, read.payload);
 };
 
@@ -192,4 +199,35 @@ const payloadRefusal = (kind: UpdateKind, payload: unknown): "invalid_payload" |
 		return typeof agent === "string" && agent !== "" ? null : "invalid_payload";
 	}
 	return null;
+};
+
+/** The choices of `resolve_block` by kind (temporal.md "Choices by kind"); `call_owner` is the engineer's on any block it handles. */
+const RESOLVE_CHOICES: Readonly<Record<string, readonly string[]>> = {
+	scope: [],
+	dependency: ["remove_dependency", "replace_dependency"],
+	execution: ["retry", "raise_limit"],
+	usage_limit: ["retry"],
+	agent_question: [],
+	check_environment: ["retry"],
+	rework_limit: ["raise_limit"],
+};
+
+/**
+ * The form of a resolve_block payload, checked only for the fields it carries (a bare `{block_kind}` stays valid: the exit is the kind's).
+ * `answer` is text; `resume_to` is the kind's own exit; `choice` is one of the kind's choices or `call_owner`, which the owner does
+ * not use (`actorId` set) and which names a reason. A cost-raising choice by an engineer is the API's `owner_only`, not here.
+ */
+const resolveRefusal = (state: TaskState, read: DecisionRead): "invalid_payload" | null => {
+	const { payload } = read;
+	const answer = payloadField(payload, "answer");
+	if (answer !== undefined && (typeof answer !== "string" || answer.trim() === "")) return "invalid_payload";
+	const resumeTo = payloadField(payload, "resume_to");
+	if (resumeTo !== undefined && (state.blockKind === null || resumeTo !== BLOCK_KINDS[state.blockKind].exit)) return "invalid_payload";
+	const choice = payloadField(payload, "choice");
+	if (choice === undefined) return null;
+	if (choice === "call_owner") {
+		const reason = payloadField(payload, "reason");
+		return read.actorId === null && typeof reason === "string" && reason.trim() !== "" ? null : "invalid_payload";
+	}
+	return typeof choice === "string" && state.blockKind !== null && (RESOLVE_CHOICES[state.blockKind] ?? []).includes(choice) ? null : "invalid_payload";
 };

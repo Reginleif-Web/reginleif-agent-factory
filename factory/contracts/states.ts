@@ -70,7 +70,7 @@ export type ExecutorReportStatus = (typeof executorReportStatuses)[number];
 export const proposalKinds = ['decomposition', 'agent_proposal'] as const;
 export type ProposalKind = (typeof proposalKinds)[number];
 
-export type MigrationKey = '0002' | 'robotics';
+export type MigrationKey = '0002' | '0011' | 'robotics';
 
 export type TransitionRow = {
   readonly from_status: TaskState;
@@ -148,6 +148,9 @@ export const taskTransitions = [
   { from_status: 'PAUSED', to_status: 'BLOCKED', introducedBy: '0002' },
   { from_status: 'PAUSED', to_status: 'CANCELLED', introducedBy: '0002' },
   { from_status: 'PAUSED', to_status: 'CANCELLING', introducedBy: '0002' },
+  // 0011: ASSIGNED had no exit but RUNNING, so a run that could not be prepared had nowhere to go (state-exit rule).
+  { from_status: 'ASSIGNED', to_status: 'BLOCKED', introducedBy: '0011' },
+  { from_status: 'ASSIGNED', to_status: 'FAILED', introducedBy: '0011' },
 ] as const satisfies readonly TransitionRow[];
 
 export type BlockTargetRule = {
@@ -170,6 +173,9 @@ export const blockedKindTargets = [
   { kind: 'quarantine', to_status: 'ASSIGNED', introducedBy: 'robotics' },
 ] as const satisfies readonly BlockTargetRule[];
 
+// Exits that leave BLOCKED whatever its kind (cancel, pause, revise); only the progress exit is decided by the kind (0011).
+export const blockedFreeExits: readonly TaskState[] = ['CANCELLED', 'CANCELLING', 'PAUSED', 'PLANNING'];
+
 export function selectTransitionsForMigration(migration: MigrationKey): readonly TransitionRow[] {
   return taskTransitions.filter((transition) => transition.introducedBy === migration);
 }
@@ -186,7 +192,7 @@ export function selectTransitionDataForMigration(migration: MigrationKey) {
 }
 
 export function canTransition(from: TaskState, to: TaskState, kind?: BlockKind): boolean {
-  if (from === 'BLOCKED') {
+  if (from === 'BLOCKED' && !blockedFreeExits.includes(to)) {
     return kind !== undefined
       && blockedKindTargets.some((rule) => rule.kind === kind && rule.to_status === to)
       && taskTransitions.some((transition) => transition.from_status === from && transition.to_status === to);

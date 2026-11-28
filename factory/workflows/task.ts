@@ -80,6 +80,7 @@ export async function TaskWorkflow(input: TaskWorkflowInput): Promise<TaskState>
 			SelectAgent: proxyLocalActivities<Pick<ControlActivities, "SelectAgent">>(optionsOf("SelectAgent")).SelectAgent,
 			NotifyUser: proxyLocalActivities<Pick<ControlActivities, "NotifyUser">>(optionsOf("NotifyUser")).NotifyUser,
 			RequestReview: proxyLocalActivities<Pick<ControlActivities, "RequestReview">>(optionsOf("RequestReview")).RequestReview,
+			RecordRun: proxyLocalActivities<Pick<ControlActivities, "RecordRun">>(optionsOf("RecordRun")).RecordRun,
 		};
 		const bound = settings[HISTORY_MAX_EVENTS_KEY];
 		maxEvents = typeof bound === "number" && Number.isFinite(bound) && bound > 0 ? bound : null;

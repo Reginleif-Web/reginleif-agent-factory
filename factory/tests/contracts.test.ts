@@ -41,8 +41,10 @@ test('task states match the database enum exactly', async () => {
 test('transition data covers the documented task transition rows', () => {
   // database.md:327-333 requires the architecture transitions plus kind-specific BLOCKED exits.
   // architecture.md:149-165 and temporal.md:332-343 provide the concrete rows and block targets.
-  assert.equal(taskTransitions.length, 69);
+  assert.equal(taskTransitions.length, 71);
   for (const row of [
+    { from_status: 'ASSIGNED', to_status: 'BLOCKED' },
+    { from_status: 'ASSIGNED', to_status: 'FAILED' },
     { from_status: 'CREATED', to_status: 'PLANNING' },
     { from_status: 'RUNNING', to_status: 'ASSIGNED' },
     { from_status: 'CANCELLING', to_status: 'CANCELLED' },
@@ -69,7 +71,7 @@ test('migration selectors keep robotics block kinds out of migration 0002', () =
   const migrationTwoData = selectTransitionDataForMigration('0002');
   const roboticsData = selectTransitionDataForMigration('robotics');
 
-  assert.equal(migrationTwoPairs.length, taskTransitions.length);
+  assert.equal(migrationTwoPairs.length + selectTransitionsForMigration('0011').length, taskTransitions.length);
   assert.equal(migrationTwoBlockTargets.length, 7);
   assert.equal(roboticsBlockTargets.length, 4);
   assert.deepEqual(migrationTwoData, { taskTransitions: migrationTwoPairs, blockKindTargets: migrationTwoBlockTargets });

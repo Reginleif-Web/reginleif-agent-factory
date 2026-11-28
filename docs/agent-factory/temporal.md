@@ -296,8 +296,8 @@ X; `flag` sets a flag, no move; `stop` stops a live run first (rule L). `*` see 
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
 | CREATED | R | R | R | ->CANCELLED | ->PAUSED | R | ->PLANNING | note | applies | R | R | R |
 | PLANNING | R | R | R | L | P | clears flag, else R | stop, ->PLANNING | note | applies | R | R | R |
-| READY | R | R | R | ->CANCELLED | ->PAUSED | R | ->PLANNING | note | applies | R | R | R |
-| WAITING_DEPENDENCIES | R | R | R | ->CANCELLED | ->PAUSED | R | ->PLANNING | note | applies | R | R | R |
+| READY | R | R | R | ->CANCELLED | ->PAUSED | R | note, taken at start | note | applies | R | R | R |
+| WAITING_DEPENDENCIES | R | R | R | ->CANCELLED | ->PAUSED | R | note, taken at start | note | applies | R | R | R |
 | ASSIGNED | R | R | R | L | P | clears flag, else R | note, taken at start | note | applies | R | R | allows the agent, re-runs `SelectAgent` |
 | RUNNING | R | R | R | ->CANCELLING | flag | clears flag, else R | stop, then ->ASSIGNED | note | note, next attempt | R | R | R |
 | VERIFYING | R | R | R | L | P | clears flag, else R | stop, ->REWORK_REQUIRED | note | note | R | R | R |
@@ -338,9 +338,9 @@ started.
 |---|---|---|---|
 | CREATED | PLANNING | pause, revise | cancel |
 | PLANNING | READY, BLOCKED `scope`, FAILED | pause, revise | cancel |
-| READY | WAITING_DEPENDENCIES, ASSIGNED | pause, revise | cancel |
-| WAITING_DEPENDENCIES | ASSIGNED, BLOCKED `dependency` | pause, revise | cancel |
-| ASSIGNED | RUNNING | `allow_agent`, pause, revise | cancel |
+| READY | WAITING_DEPENDENCIES, ASSIGNED | pause, revise (stored) | cancel |
+| WAITING_DEPENDENCIES | ASSIGNED, BLOCKED `dependency` | pause, revise (stored) | cancel |
+| ASSIGNED | RUNNING, BLOCKED (the run could not be prepared), FAILED (a non-retryable preparation error) | `allow_agent`, pause, revise (stored) | cancel |
 | RUNNING | VERIFYING, ASSIGNED (died), BLOCKED, FAILED | pause (held), revise | cancel (CANCELLING) |
 | VERIFYING | AWAITING_APPROVAL, REWORK_REQUIRED, BLOCKED, FAILED | pause (held), revise | cancel |
 | AWAITING_APPROVAL | none; waits for the owner | approve, reject, request_changes, revise, pause | cancel |

@@ -20,7 +20,11 @@ export const ATTEMPT_MAX_KEY = "attempt.max";
 export const REWORK_MAX_ROUNDS_KEY = "rework.maxRounds";
 /** Optional bound of Temporal's retries of one infra failure (temporal.md retry classes); absent means only schedule-to-close bounds them. */
 export const RETRY_INFRA_MAX_ATTEMPTS_KEY = "retry.infra.maxAttempts";
-export const LIFECYCLE_SETTING_KEYS = [ATTEMPT_MAX_KEY, REWORK_MAX_ROUNDS_KEY, RETRY_INFRA_MAX_ATTEMPTS_KEY];
+/** How many repair runs of a mandatory check that did not run (D26) before BLOCKED `check_environment`; policy column `max_auto_fixes`. */
+export const AUTO_FIX_MAX_KEY = "autoFix.max";
+/** The longest the workflow sleeps to a known usage-limit reset (seconds, temporal.md retry class `usageLimit`); absent means it does not sleep. */
+export const LIMIT_MAX_WAIT_KEY = "limit.maxWait";
+export const LIFECYCLE_SETTING_KEYS = [ATTEMPT_MAX_KEY, REWORK_MAX_ROUNDS_KEY, RETRY_INFRA_MAX_ATTEMPTS_KEY, AUTO_FIX_MAX_KEY, LIMIT_MAX_WAIT_KEY];
 
 /** Failure types of the machine activities that retrying cannot cure (temporal.md retry classes `invalid` and `external`). */
 const INVALID_TYPES = ["ValidationError", "PermissionDenied", "BudgetExceeded", "BadInput"];
@@ -31,7 +35,6 @@ export const DEPENDENCY_CYCLE = "DependencyCycle";
 
 const CONTRACT_VERSION = 1;
 const CHECK_ID = "unit";
-const CHECK_REPAIR_ID = "unit-repair";
 
 // The machine contracts as the workflow sees them (the zod contracts live with the fakes and the machine worker, not in workflow code).
 interface MachineIO {
@@ -46,7 +49,7 @@ interface MachineIO {
 }
 type MachineName = keyof MachineIO;
 
-export type LifecycleControl = Pick<ControlActivities, "PrepareTask" | "ResolveDependencies" | "SelectAgent" | "NotifyUser" | "RequestReview">;
+export type LifecycleControl = Pick<ControlActivities, "PrepareTask" | "ResolveDependencies" | "SelectAgent" | "NotifyUser" | "RequestReview" | "RecordRun">;
 
 export interface LifecycleEvent {
 	readonly type: string;
@@ -87,6 +90,10 @@ const limitOf = (settings: Readonly<Record<string, unknown>>, key: string): numb
 const landing = (state: TaskState, to: TaskStatus): TaskState =>
 	state.pauseRequested && !isFinal(to) ? { ...moveTo(state, "PAUSED"), resumeTo: to } : moveTo(state, to);
 
+// A block raised while a pause is pending: the task goes to PAUSED that will resume into BLOCKED, holding the block (the flag is not left set).
+const blocking = (state: TaskState, kind: Parameters<typeof blockTask>[1], reason: string): TaskState =>
+	state.pauseRequested ? { ...moveTo(blockTask(state, kind, reason), "PAUSED"), resumeTo: "BLOCKED" } : blockTask(state, kind, reason);
+
 const runEnded = (state: TaskState): TaskState => ({ ...state, executionId: null, stopping: false, afterStop: null });
 
 export const runLifecycle = async (host: LifecycleHost): Promise<void> => {
@@ -94,6 +101,7 @@ export const runLifecycle = async (host: LifecycleHost): Promise<void> => {
 	const attemptMax = limitOf(settings, ATTEMPT_MAX_KEY);
 	const reworkMax = limitOf(settings, REWORK_MAX_ROUNDS_KEY);
 	const infraMax = limitOf(settings, RETRY_INFRA_MAX_ATTEMPTS_KEY);
+	const autoFixMax = limitOf(settings, AUTO_FIX_MAX_KEY);
 	// Driver-local, rebuilt by replay: where the `no_eligible_agent` wait of this selection started, and the Monitor's log offset.
 	let noAgentWakes: number | null = null;
 
@@ -144,19 +152,15 @@ export const runLifecycle = async (host: LifecycleHost): Promise<void> => {
 		}
 	};
 
-	/** A machine failure after Temporal's retries: `invalid` fails the task, anything else blocks it (the DB has no such exit from ASSIGNED, which parks instead). */
+	/** A machine failure after Temporal's retries: `invalid` fails the task, anything else blocks it `execution` (migration 0011 gave ASSIGNED both exits). */
 	const onMachineFailure = async (s: TaskState, error: unknown, where: string): Promise<boolean> => {
 		if (!(error instanceof ActivityFailure || error instanceof ApplicationFailure)) throw error;
 		const type = failureType(error) ?? "ActivityFailure";
 		const reason = `${where}: ${error instanceof ActivityFailure ? (error.cause?.message ?? error.message) : error.message}`;
 		const event = note("machine_failure", { where, type, message: reason });
 		const stillHere = (cur: TaskState): boolean => cur.status === s.status && cur.executionId === s.executionId;
-		if (s.status === "ASSIGNED") {
-			await host.commit(stillHere, null, event);
-			return false;
-		}
 		if (INVALID_TYPES.includes(type)) await host.commit(stillHere, (cur) => moveTo({ ...runEnded(cur) }, "FAILED"), event);
-		else await host.commit(stillHere, (cur) => blockTask(cur, "execution", reason), event);
+		else await host.commit(stillHere, (cur) => blocking(cur, "execution", reason), event);
 		return true;
 	};
 
@@ -187,7 +191,7 @@ export const runLifecycle = async (host: LifecycleHost): Promise<void> => {
 		const here = sameRun(s.executionId as string);
 		if (s.attemptsInRound >= attemptMax) {
 			// The budget of attempts is spent: the dead run is let go and a resolved block starts a fresh round.
-			await host.commit(here, (cur) => blockTask({ ...runEnded(cur), attemptsInRound: 0 }, "execution", `${why}; attempt.max reached`), note("attempts_exhausted", { why }));
+			await host.commit(here, (cur) => blocking({ ...runEnded(cur), attemptsInRound: 0 }, "execution", `${why}; attempt.max reached`), note("attempts_exhausted", { why }));
 		} else {
 			await host.commit(here, (cur) => landing(runEnded(cur), "ASSIGNED"), note("run_lost", { why }));
 		}
@@ -258,6 +262,8 @@ export const runLifecycle = async (host: LifecycleHost): Promise<void> => {
 				}),
 				note("agent_assigned", { executionId, agentId: chosen.agentId, machineId: chosen.workerId }),
 			);
+			// The run row the reviewer pick (D20) reads its implementers from; idempotent by execution id.
+			await control.RecordRun({ taskId, executionId, role: "implementer", agentId: chosen.agentId, attemptNumber: host.state().attempt, status: "starting" });
 			return true;
 		}
 		const executionId = s.executionId;
@@ -287,26 +293,26 @@ export const runLifecycle = async (host: LifecycleHost): Promise<void> => {
 		const round = s.rework + 1;
 		try {
 			const first = await call("RunAutomatedChecks", machineId, { executionId, checkId: CHECK_ID });
-			let review = await control.RequestReview({ taskId, round, repairAttempted: false, checks: [{ name: CHECK_ID, mandatory: true, status: first.status }] });
-			if (review.kind === "repair") {
-				const again = await call("RunAutomatedChecks", machineId, { executionId, checkId: CHECK_REPAIR_ID });
-				review = await control.RequestReview({ taskId, round, repairAttempted: true, checks: [{ name: CHECK_ID, mandatory: true, status: again.status }] });
-			}
+			// D26: a mandatory check that did not run first gets an agent run to repair its cause (autoFix.max of them); only then it blocks.
+			const repairAttempted = first.status === "not_run" && s.autoFix >= autoFixMax;
+			const review = await control.RequestReview({ taskId, round, repairAttempted, checks: [{ name: CHECK_ID, mandatory: true, status: first.status }] });
 			const still = (cur: TaskState): boolean => cur.status === "VERIFYING" && cur.rework === s.rework;
 			switch (review.kind) {
 				case "reviewer":
-					await host.commit(still, (cur) => landing(cur, "AWAITING_APPROVAL"), note("review_started", { round, agentId: review.agentId }));
+					await host.commit(still, (cur) => landing({ ...cur, autoFix: 0 }, "AWAITING_APPROVAL"), note("review_started", { round, agentId: review.agentId }));
+					break;
+				case "repair":
+					await host.commit(still, (cur) => ({ ...moveTo(cur, "REWORK_REQUIRED"), autoFix: cur.autoFix + 1 }), note("check_repair", { round, names: review.names, autoFix: s.autoFix + 1 }));
 					break;
 				case "failed":
-				case "repair":
-					if (s.rework >= reworkMax) await host.commit(still, (cur) => blockTask(cur, "rework_limit", `rework.maxRounds ${reworkMax} reached: ${review.names.join(", ")}`), note("rework_limit", { round }));
-					else await host.commit(still, (cur) => ({ ...moveTo(cur, "REWORK_REQUIRED"), rework: cur.rework + 1 }), note("rework_required", { round, names: review.names }));
+					if (s.rework >= reworkMax) await host.commit(still, (cur) => blocking({ ...cur, autoFix: 0 }, "rework_limit", `rework.maxRounds ${reworkMax} reached: ${review.names.join(", ")}`), note("rework_limit", { round }));
+					else await host.commit(still, (cur) => ({ ...moveTo(cur, "REWORK_REQUIRED"), rework: cur.rework + 1, autoFix: 0 }), note("rework_required", { round, names: review.names }));
 					break;
 				case "none":
-					await host.commit(still, (cur) => blockTask(cur, "check_environment", review.reason), note("review_unavailable", { reason: review.reason }));
+					await host.commit(still, (cur) => blocking(cur, "check_environment", review.reason), note("review_unavailable", { reason: review.reason }));
 					break;
 				case "blocked":
-					await host.commit(still, (cur) => blockTask(cur, "check_environment", `checks not run: ${review.names.join(", ")}`), note("checks_not_run", { names: review.names }));
+					await host.commit(still, (cur) => blocking({ ...cur, autoFix: 0 }, "check_environment", `checks not run: ${review.names.join(", ")}`), note("checks_not_run", { names: review.names }));
 					break;
 			}
 			return true;
@@ -395,7 +401,10 @@ export const runLifecycle = async (host: LifecycleHost): Promise<void> => {
 			await host.commit(() => true, null, note("published", { branch, url: published.url, created: published.created }));
 		} catch (error) {
 			if (!(error instanceof ActivityFailure)) throw error;
-			await host.commit(() => true, null, note("publish_failed", { branch, type: failureType(error), message: error.cause?.message ?? error.message }));
+			const message = error.cause?.message ?? error.message;
+			// A failed publish is a run row of its own (temporal.md: external class), not only an event.
+			await control.RecordRun({ taskId, executionId: uuid4(), role: "implementer", agentId: done.agentId, attemptNumber: done.attempt + 1, status: "failed", errorCode: failureType(error) ?? undefined, errorMessage: message });
+			await host.commit(() => true, null, note("publish_failed", { branch, type: failureType(error), message }));
 		}
 	}
 };

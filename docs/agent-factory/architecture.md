@@ -150,7 +150,7 @@ confirmed". On reconnect the worker stops such a run before anything else.
 | PLANNING | READY / BLOCKED | plan stays inside the approved scope / needs the owner (kind `scope`) |
 | READY | WAITING_DEPENDENCIES / ASSIGNED | dependencies open / met |
 | WAITING_DEPENDENCIES | ASSIGNED / BLOCKED | all met / one ended in a final state other than ACCEPTED |
-| ASSIGNED | RUNNING | execution started; no machine available keeps it ASSIGNED and raises a notice |
+| ASSIGNED | RUNNING / BLOCKED / FAILED | execution started; no machine available keeps it ASSIGNED and raises a notice / the run cannot be prepared (kind `execution`, or `usage_limit` when the agent's limit is spent) / a non-retryable error in preparation |
 | RUNNING | VERIFYING / BLOCKED / FAILED | result collected / state unclear, limit or agent question / non-retryable error |
 | VERIFYING | AWAITING_APPROVAL / REWORK_REQUIRED / BLOCKED | checks and review pass / confirmed findings / rework limit reached |
 | AWAITING_APPROVAL | ACCEPTED / REWORK_REQUIRED / REJECTED | owner's ACCEPT / REQUEST_CHANGES / REJECT |
@@ -178,7 +178,7 @@ Final: ACCEPTED, REJECTED, CANCELLED, FAILED.
 - **Revision.** It never edits an old one. In RUNNING the run is stopped as in a cancel (shown as RUNNING, "stopping for new
   requirements"), the worktree stays, and once the machine confirms the end a new attempt starts with the new revision. In
   VERIFYING and AWAITING_APPROVAL the task goes to REWORK_REQUIRED with the new revision; in REWORK_REQUIRED it stays and
-  takes it. In BLOCKED and in states before ASSIGNED it goes to PLANNING, in ASSIGNED it stays and takes it. BLOCKED with a
+  takes it. In BLOCKED, CREATED and PLANNING it goes to PLANNING (restarting it in PLANNING), in READY, WAITING_DEPENDENCIES and ASSIGNED it stays and takes it (the table has no move from those states back to PLANNING). BLOCKED with a
   run whose end is not confirmed only stores it, and the next `resolve_block` goes to PLANNING. In PAUSED it is stored and
   RESUME goes to PLANNING (back to BLOCKED when it was paused there with such a run). A decision carries its revision number; one on an older revision is refused.
 - **Dependency.** One that ends without ACCEPTED puts the waiting task into BLOCKED, handled first by the chief engineer. The handler removes

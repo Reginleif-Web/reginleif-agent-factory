@@ -2,8 +2,9 @@
 // cell of the table is applicable, and the in-memory refusal checks follow temporal.md "Order of checks".
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { FORWARD_EXITS, MATRIX, applyCell, memoryRefusal, resolveCell } from "../workflows/task-matrix.ts";
-import { FINAL_STATUSES, TASK_STATUSES, UPDATE_KINDS, initialState, isFinal, type TaskState, type TaskStatus } from "../workflows/task-state.ts";
+import { canTransition } from "../contracts/states.ts";
+import { FORWARD_EXITS, MATRIX, applyCell, blockTask, memoryRefusal, resolveCell } from "../workflows/task-matrix.ts";
+import { BLOCK_KINDS, FINAL_STATUSES, TASK_STATUSES, UPDATE_KINDS, initialState, isFinal, type TaskState, type TaskStatus } from "../workflows/task-state.ts";
 
 /** A representative state of each status, with the fields its operations read (a block, a pause origin, a stop in progress). */
 const sample = (status: TaskStatus, more: Partial<TaskState> = {}): TaskState => {
@@ -51,6 +52,30 @@ describe("operation matrix", () => {
 					const holds = next.status === "BLOCKED" || (next.status === "PAUSED" && next.resumeTo === "BLOCKED");
 					if (!holds) assert.equal(next.blockKind, null, `${status}/${kind}: a block does not outlive BLOCKED`);
 				}
+			}
+		}
+	});
+
+	it("every status change the matrix or the forward exits make is a row of task_transitions (the DB guard accepts it)", () => {
+		const kinds = ["scope", "dependency", "execution", "usage_limit", "agent_question", "check_environment", "rework_limit"] as const;
+		const origins = TASK_STATUSES.filter((status) => !isFinal(status) && status !== "PAUSED" && status !== "CANCELLING");
+		for (const status of TASK_STATUSES) {
+			const variants: Partial<TaskState>[] = [{}, { executionId: "e1" }];
+			if (status === "PAUSED") for (const origin of origins) variants.push({ resumeTo: origin });
+			if (status === "BLOCKED") for (const kind of kinds) variants.push({ blockKind: kind, blockHandler: kind === "scope" || kind === "agent_question" ? "owner" : "chief_engineer" });
+			for (const more of variants) {
+				const state = sample(status, more);
+				for (const kind of UPDATE_KINDS) {
+					const cell = resolveCell(state, kind);
+					if (cell === "R" || cell === "X") continue;
+					const { state: next } = applyCell(state, kind, cell, { priority: 2, agent_id: "a" });
+					if (next.status === status) continue;
+					assert.ok(canTransition(status, next.status, state.blockKind ?? undefined), `${status}${state.blockKind ? `(${state.blockKind})` : ""} -> ${next.status} by ${kind} is no task_transitions row`);
+				}
+			}
+			for (const to of FORWARD_EXITS[status]) {
+				if (status === "BLOCKED") continue;
+				assert.ok(canTransition(status, to), `${status} -> ${to} (forward exit) is no task_transitions row`);
 			}
 		}
 	});
@@ -143,5 +168,96 @@ describe("memoryRefusal (order of checks)", () => {
 	it("pause/resume flags follow the state: resume without a pending pause is not allowed", () => {
 		assert.equal(memoryRefusal(sample("RUNNING", { executionId: "e1" }), "resume", { actorId: "o", payload: {}, revisionNumber: null }), "not_allowed_in_state");
 		assert.equal(memoryRefusal(sample("RUNNING", { executionId: "e1", pauseRequested: true }), "resume", { actorId: "o", payload: {}, revisionNumber: null }), null);
+	});
+});
+
+describe("state-exit: BLOCKED kinds", () => {
+	const PHASE3_KINDS = ["scope", "dependency", "execution", "usage_limit", "agent_question", "check_environment", "rework_limit"] as const;
+
+	it("each kind enters with its rule's handler and leaves through its exit, which is a task_transitions row", () => {
+		for (const kind of PHASE3_KINDS) {
+			const from = sample("ASSIGNED");
+			const blocked = blockTask(from, kind, "reason");
+			assert.equal(blocked.status, "BLOCKED", kind);
+			assert.equal(blocked.blockKind, kind);
+			assert.equal(blocked.blockHandler, BLOCK_KINDS[kind].handler, kind);
+			// scope and agent_question are the owner's from the start, every other phase-3 kind the chief engineer's.
+			assert.equal(blocked.blockHandler, kind === "scope" || kind === "agent_question" ? "owner" : "chief_engineer", kind);
+			const actor = blocked.blockHandler === "owner" ? "o" : null;
+			assert.equal(memoryRefusal(blocked, "resolve_block", { actorId: actor, payload: { block_kind: kind }, revisionNumber: 1 }), null, kind);
+			const left = applyCell(blocked, "resolve_block", resolveCell(blocked, "resolve_block"), { block_kind: kind });
+			assert.equal(left.state.status, BLOCK_KINDS[kind].exit, kind);
+			assert.deepEqual([left.state.blockKind, left.state.blockHandler], [null, null], `${kind}: leaving clears the block`);
+			assert.ok(canTransition("BLOCKED", left.state.status, kind), `${kind}: BLOCKED -> ${left.state.status} is no task_transitions row`);
+		}
+	});
+
+	it("the owner can always leave a block: cancel reaches a final state, also from PAUSED holding a block", () => {
+		for (const kind of PHASE3_KINDS) {
+			const blocked = blockTask(sample("ASSIGNED"), kind, "reason");
+			assert.ok(!isFinal(blocked.status));
+			for (const state of [blocked, applyCell(blocked, "pause", resolveCell(blocked, "pause"), {}).state]) {
+				const cell = resolveCell(state, "cancel");
+				assert.notEqual(cell, "R", `${kind}/${state.status}`);
+				assert.ok(isFinal(applyCell(state, "cancel", cell, {}).state.status), `${kind}/${state.status}: cancel ends the task`);
+			}
+		}
+	});
+
+	it("every status reaches a final state without an actor that may be unavailable: the engineer's blocks have an owner exit too", () => {
+		for (const kind of PHASE3_KINDS) {
+			const blocked = blockTask(sample("ASSIGNED"), kind, "reason");
+			if (blocked.blockHandler !== "chief_engineer") continue;
+			const called = applyCell(blocked, "resolve_block", resolveCell(blocked, "resolve_block"), { choice: "call_owner", reason: "x" });
+			assert.equal(called.state.blockHandler, "owner", kind);
+			assert.ok(memoryRefusal(called.state, "resolve_block", { actorId: "o", payload: { block_kind: kind }, revisionNumber: 1 }) === null, kind);
+		}
+	});
+});
+
+describe("resolve_block choices", () => {
+	const engineerBlock = (kind: "dependency" | "execution" | "usage_limit" | "rework_limit"): TaskState =>
+		sample("BLOCKED", { blockKind: kind, blockHandler: "chief_engineer", blockReason: "r" });
+	const eng = (payload: unknown) => ({ actorId: null, payload, revisionNumber: 1 });
+	const owner = (payload: unknown) => ({ actorId: "o", payload, revisionNumber: 1 });
+
+	it("call_owner keeps the status and hands the block to the owner; a second engineer resolution is block_handled", () => {
+		const state = engineerBlock("execution");
+		assert.equal(memoryRefusal(state, "resolve_block", eng({ block_kind: "execution", choice: "call_owner", reason: "needs a call" })), null);
+		const applied = applyCell(state, "resolve_block", resolveCell(state, "resolve_block"), { block_kind: "execution", choice: "call_owner", reason: "x" });
+		assert.equal(applied.effect, "owner_called");
+		assert.equal(applied.state.status, "BLOCKED");
+		assert.equal(applied.state.blockKind, "execution");
+		assert.equal(applied.state.blockHandler, "owner");
+		assert.equal(memoryRefusal(applied.state, "resolve_block", eng({ block_kind: "execution" })), "block_handled");
+		// The owner still resolves it and leaves through the kind's exit.
+		assert.equal(memoryRefusal(applied.state, "resolve_block", owner({ block_kind: "execution" })), null);
+	});
+
+	it("call_owner needs the engineer and a reason", () => {
+		const state = engineerBlock("dependency");
+		assert.equal(memoryRefusal(state, "resolve_block", owner({ choice: "call_owner", reason: "x" })), "invalid_payload");
+		assert.equal(memoryRefusal(state, "resolve_block", eng({ choice: "call_owner" })), "invalid_payload");
+		assert.equal(memoryRefusal(state, "resolve_block", eng({ choice: "call_owner", reason: " " })), "invalid_payload");
+	});
+
+	it("a choice must belong to the kind; answer is text; resume_to is the kind's own exit", () => {
+		assert.equal(memoryRefusal(engineerBlock("dependency"), "resolve_block", eng({ choice: "remove_dependency" })), null);
+		assert.equal(memoryRefusal(engineerBlock("dependency"), "resolve_block", eng({ choice: "retry" })), "invalid_payload");
+		assert.equal(memoryRefusal(engineerBlock("usage_limit"), "resolve_block", eng({ choice: "retry" })), null);
+		assert.equal(memoryRefusal(engineerBlock("rework_limit"), "resolve_block", eng({ choice: "raise_limit" })), null);
+		assert.equal(memoryRefusal(sample("BLOCKED"), "resolve_block", owner({ answer: "use the second option" })), null);
+		assert.equal(memoryRefusal(sample("BLOCKED"), "resolve_block", owner({ answer: 5 })), "invalid_payload");
+		assert.equal(memoryRefusal(sample("BLOCKED"), "resolve_block", owner({ answer: "" })), "invalid_payload");
+		assert.equal(memoryRefusal(sample("BLOCKED"), "resolve_block", owner({ resume_to: "PLANNING" })), null);
+		assert.equal(memoryRefusal(sample("BLOCKED"), "resolve_block", owner({ resume_to: "RUNNING" })), "invalid_payload");
+	});
+
+	it("a bare resolution leaves through the kind's exit and clears the block", () => {
+		const state = engineerBlock("rework_limit");
+		const applied = applyCell(state, "resolve_block", resolveCell(state, "resolve_block"), { block_kind: "rework_limit" });
+		assert.equal(applied.state.status, "REWORK_REQUIRED");
+		assert.equal(applied.state.blockKind, null);
+		assert.equal(applied.state.blockHandler, null);
 	});
 });

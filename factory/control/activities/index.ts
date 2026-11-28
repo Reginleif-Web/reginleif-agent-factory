@@ -8,6 +8,7 @@ import { PersistTaskEvent, type PersistTaskEventInput } from "./persist-task-eve
 import { PrepareTask, type PrepareTaskInput } from "./prepare-task.ts";
 import { ReadDecision, type ReadDecisionInput } from "./read-decision.ts";
 import { RecordDecisionOutcome, type RecordDecisionOutcomeInput } from "./record-decision-outcome.ts";
+import { RecordRun, type RecordRunInput } from "./record-run.ts";
 import { RequestReview, type RequestReviewInput } from "./request-review.ts";
 import { ResolveDependencies } from "./resolve-dependencies.ts";
 import { SelectAgent, type SelectAgentInput } from "./select-agent.ts";
@@ -39,6 +40,7 @@ export const createControlActivities = (repo: Repo, db: PostgresJsDatabase<any>)
 		return { id: notification.id, created };
 	},
 	RequestReview: (input: RequestReviewInput) => RequestReview(db, input),
+	RecordRun: (input: RecordRunInput) => RecordRun(db, input),
 });
 
 export type ControlActivities = ReturnType<typeof createControlActivities>;

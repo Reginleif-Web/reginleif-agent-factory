@@ -116,10 +116,15 @@ export interface DecisionUpdateInput {
 	readonly decisionId: string;
 }
 
-/** The columns of the `tasks` row that follow the workflow (temporal.md "The task row follows the workflow"). */
+/**
+ * The columns of the `tasks` row that follow the workflow (temporal.md "The task row follows the workflow"). The row holds a block
+ * kind and handler only in BLOCKED (CHECKs `tasks_block_kind_status` and `tasks_block_handler_status`); a PAUSED task that will
+ * resume into BLOCKED keeps its block in the workflow memory only, and the row shows `resume_to = 'BLOCKED'`.
+ */
 export const projectionOf = (state: TaskState): TaskProjection => ({
-	status: state.status, currentRevision: state.revision, blockKind: state.blockKind, blockReason: state.blockReason,
-	blockHandler: state.blockHandler, resumeTo: state.resumeTo, pauseRequested: state.pauseRequested, stopping: state.stopping,
+	status: state.status, currentRevision: state.revision,
+	blockKind: state.status === "BLOCKED" ? state.blockKind : null, blockReason: state.blockReason,
+	blockHandler: state.status === "BLOCKED" ? state.blockHandler : null, resumeTo: state.resumeTo, pauseRequested: state.pauseRequested, stopping: state.stopping,
 	endUnconfirmed: state.endUnconfirmed, assignedAgentId: state.agentId, completed: isFinal(state.status),
 });
 

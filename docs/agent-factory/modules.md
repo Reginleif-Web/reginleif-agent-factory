@@ -122,16 +122,17 @@ Migrations, in order (foreign keys decide the order; each table is in exactly on
 | 0008 | (no new table) | the client migration (client.md): `messages.owner_id` (FK to `owners`) and the check `messages_owner_principal` (replaces `messages_owner_session`), so the owner token may post as well as an enrolled device session |
 | 0009 | (no new table) | adds the initial revision of the seeded `_factory` standing task and sets its current revision |
 | 0010 | (no new table) | `control_registry_grants` (phase 3): `af_control` may insert `registry_inquiry_results` rows found by the gate (a guard allows only `found_by = gate` and no verdict); the planned migrations below keep their order and take the next free numbers when built |
-| next | gpu_leases | (planned as 0011) lands in phase 5 with its use; its keys target tables that exist by then |
-| 0012 | agent_versions, positions, position_assignments, personnel_facts | phase 5 (D32, [personnel.md](personnel.md), database.md Personnel tables); adds the nullable `task_runs.agent_version_id` by `alter` (an expand step); immutability triggers, the one live holder per position, one live chief engineer |
-| 0013 | assessments, incidents, qualification_reviews, corrective_actions, measures | phase 8; adds `position_assignments.measure_id` by `alter`; the measure triggers (evidence, author, independent check, term, `observe` mode): the independent check is a `qualification_reviews` row of the same incident, verdict `confirmed`, by an author other than the accused and the decider, the same rule for `incidents.classified_by` (set once) and for an unfounded escalation; `incidents.suspension_id` links the critical reaction written since phase 4; the incident status audit |
+| 0011 | (no new table) | `assigned_exits` (phase 3): two `task_transitions` rows, ASSIGNED to BLOCKED and ASSIGNED to FAILED, so a run that cannot be prepared leaves ASSIGNED (every state has an exit); the planned migrations below shift by one |
+| next | gpu_leases | (planned as 0012) lands in phase 5 with its use; its keys target tables that exist by then |
+| 0013 | agent_versions, positions, position_assignments, personnel_facts | phase 5 (D32, [personnel.md](personnel.md), database.md Personnel tables); adds the nullable `task_runs.agent_version_id` by `alter` (an expand step); immutability triggers, the one live holder per position, one live chief engineer |
+| 0014 | assessments, incidents, qualification_reviews, corrective_actions, measures | phase 8; adds `position_assignments.measure_id` by `alter`; the measure triggers (evidence, author, independent check, term, `observe` mode): the independent check is a `qualification_reviews` row of the same incident, verdict `confirmed`, by an author other than the accused and the decider, the same rule for `incidents.classified_by` (set once) and for an unfounded escalation; `incidents.suspension_id` links the critical reaction written since phase 4; the incident status audit |
 
-Count: 9+3+12+5+4+6+6+0+0+0+1+4+5 = 55 tables, each in exactly one file (see Verification).
+Count: 9+3+12+5+4+6+6+0+0+0+0+1+4+5 = 55 tables, each in exactly one file (see Verification).
 
 The robotics migration (D34) is separate and not part of the 55: it adds the eighteen robotics tables (working names in
 [database.md](database.md), Robotics tables) and is built only when robotics starts (Phase R1 below). Numbers are forward
-only and follow build order: 0013 (personnel, phase 8) and the robotics migration are independent, each depends only on
-0001-0012, and the one built first takes the next free number (database.md, Robotics tables, Migration order). The
+only and follow build order: 0014 (personnel, phase 8) and the robotics migration are independent, each depends only on
+0001-0013, and the one built first takes the next free number (database.md, Robotics tables, Migration order). The
 `migration-order` check covers every migration that exists.
 
 Rig files changed: the command `rig factory registry` (the registry client above; the rest of the `rig factory` commands
@@ -258,7 +259,7 @@ Criterion (spec): several agents work without conflicts, authority is separated 
 | `F/personnel/profile.ts` | The profile as a read view over positions, assignments, facts and later assessments, incidents and measures | facts |
 | `F/api/handlers/personnel.ts` | The read routes of api.md for profiles and positions (the rest lands in phase 8) | profile |
 
-Migrations: 0011 (gpu_leases) and 0012 (agent_versions, positions, position_assignments, personnel_facts) here. Rig files: none.
+Migrations: 0012 (gpu_leases) and 0013 (agent_versions, positions, position_assignments, personnel_facts) here. Rig files: none.
 Proving check: `gpu-order`, `review-provider`, `review-same-subject` (a task review of another task, a failing verdict or the subject's own author does not count),
 `cleanup-command`, `policy-diff`, F11, `personnel-facts`. Parallel: each adapter
 directory, review.ts, proposals.ts, gpu and `personnel/` are disjoint lanes.
@@ -313,7 +314,7 @@ this phase adds the incident record to it.
 | `F/api/handlers/personnel.ts` (extended) | The assessment, incident, decision and owner routes of api.md; the service account of the Control Worker carries the chief engineer's decisions | all above |
 | `F/client/lib/screens/` (extended) | The later sections of the client as their data exists: Personnel, Decision Registry, Governance, Projects, Infrastructure (D33); the same API, the same rules from the server | the routes above, phase 6 client |
 
-Migrations: 0013 (assessments, incidents, qualification_reviews, corrective_actions, measures). Rig files: none. Proving
+Migrations: 0014 (assessments, incidents, qualification_reviews, corrective_actions, measures). Rig files: none. Proving
 check: `personnel-score`, `personnel-protected`, `personnel-decision`, `personnel-effect`, `personnel-chief`,
 `personnel-load`, `review-same-incident` (testing.md), `personnel-safety` again with an incident row linked to the suspension, and `personnel-facts` again with the real rows; the client sections add no check of their own beyond the client checks of phase 6. Parallel: `score`,
 `protected` and `evaluator` are disjoint; `measures` and `replacement` follow `incidents`.
@@ -350,7 +351,7 @@ admission of the owner's regulation; missing hardware is never reported as done.
 | `F/robotics/gates.ts` | The five gates; gates 4 and 5 live on the robot, the server only reads their state | lease, command |
 | `F/workflows/physical-dev.ts` | `PhysicalDevelopmentWorkflow`, a separate workflow, id `physical-dev-<program id>`; the physical BLOCKED kinds and their handlers (temporal.md) | `workflows/task.ts` |
 | `F/api/handlers/robotics.ts` | The robotics routes and role `B` of api.md; a stop in the client is a request, the confirmed state comes from the robot | api, robotics |
-| `F/db/migrations/<next free number>` | The eighteen robotics tables; not in the 55; independent of 0013 | built when robotics starts |
+| `F/db/migrations/<next free number>` | The eighteen robotics tables; not in the 55; independent of 0014 | built when robotics starts |
 | Robot runtime and controller (outside `F/`) | Runtime, controller and independent safety circuit; R2-R4, need hardware | the owner's hardware |
 
 Stages and checks: R0 audit and threat model, check `robot-no-regression` from here on, at every stage; R1 registry,
@@ -404,7 +405,7 @@ shown as current in the client (`robot-stop-view`); a camera recording outside i
 | 28 | client.md says a device never gets an agent role, the API reads a device session as the owner for the client routes | Settled: the role name `device` (owner rights for the client routes only, no token management, no new device); the hub is a separate role `hub` |
 | 29 | D33 put robotics in phase 9 as an extension point (worker kind `device`); D34 makes it a design with its own stages | Settled by D34: phase 9 holds push and voice only; the stages R0-R9 and their place are the owner's decision (robotics.md Phases, Robotics stages above) |
 | 30 | robotics.md says "no new task state", yet the physical BLOCKED kinds are new enum values | Settled: the states of the task are unchanged; only the BLOCKED kind enum grows (four kinds, exits all to ASSIGNED); a revise in a physical BLOCKED stores the revision and the task stays BLOCKED (temporal.md) |
-| 31 | The eighteen robotics tables vs the 55 totals | Settled: outside the 55, own migration numbered by build order, independent of 0013, built when robotics starts; the totals and the thirteen factory migrations stay as they are |
+| 31 | The eighteen robotics tables vs the 55 totals | Settled: outside the 55, own migration numbered by build order, independent of 0014, built when robotics starts; the totals and the fourteen factory migrations stay as they are |
 | 32 | robotics.md Coverage of the source maps source sections 8 and 9 both to "Safety and Development programme" and 24 to "Safety and Devices" | Read as the rows below; the mapping is loose, no section is dropped |
 | 33 | robotics.md says D0 to D10, the first prototype names only D0, D1 | Not a conflict: the first prototype starts with D0 and D1; the rest follow as gates pass |
 
@@ -465,7 +466,7 @@ reachable before a server exists.
 | 3.1 Remote server | `F/deploy/`, phases 1 to 3 (PostgreSQL, the embedder, then Temporal); permanent operation not reachable before a server exists |
 | 3.2 Local machine | `F/worker/`, `F/runner/`, Rig changes (phase 4) |
 | 3.3 Network model | `F/deploy/proxy/` (mTLS plus method allowlist, S6), phase 3; security.md |
-| 4.1 Tables | `F/db/schema/`, `F/db/migrations/` (0001-0013; robotics separate, numbered by build order), database.md |
+| 4.1 Tables | `F/db/schema/`, `F/db/migrations/` (0001-0014; robotics separate, numbered by build order), database.md |
 | 4.2 Database requirements | triggers and constraints in the migrations; D24 for deletion; Contradictions row 1 |
 | 5.1 Main workflow | `F/workflows/task.ts`, phase 3 |
 | 5.2 Activities | `F/control/activities/`, `F/worker/activities/` |
@@ -525,7 +526,7 @@ reachable before a server exists.
 ## Verification done
 
 - Tables: 55 tables in database.md (`outbox_events` and `execution_policies` counted once; 28 of the architecture plus the
-  six registry tables, the six rights tables, the nine personnel tables and the six client tables). Migrations 0001-0013 hold 9+3+12+5+4+6+6+0+0+0+1+4+5 = 55 tables; the eighteen robotics tables (D34) are in their own migration, outside this count. Each of the 54 first-column names plus
+  six registry tables, the six rights tables, the nine personnel tables and the six client tables). Migrations 0001-0014 hold 9+3+12+5+4+6+6+0+0+0+0+1+4+5 = 55 tables; the eighteen robotics tables (D34) are in their own migration, outside this count. Each of the 54 first-column names plus
   `task_transitions` appears in exactly one migration row, compared by name.
 - Phase deliverables: every spec phase 1-7 criterion has a module row and a proving check above. The Rig change list
   (feature, command, installer, autostart, codex-run.py) is fully assigned to phase 4, with the audit items (the five

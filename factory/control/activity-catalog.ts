@@ -29,6 +29,7 @@ export const ACTIVITIES = {
 	NotifyUser: local(),
 	CreateChildTasks: local(),
 	RequestReview: local(),
+	RecordRun: local(),
 	LoadSettings: local(["S"]),
 	RecordPrecedent: local(),
 	// Package 53: registry-first gate, block handler choice, regulation version captured at a run's start (temporal.md block rule, G9).

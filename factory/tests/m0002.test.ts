@@ -16,7 +16,7 @@ it("enforces task transitions, hierarchy, dependencies and account rights", asyn
 	try {
 		const transitions = await sql<{ from_status: string; to_status: string }[]>`SELECT from_status, to_status FROM task_transitions ORDER BY from_status, to_status`;
 		const pair = (row: { from_status: string; to_status: string }) => `${row.from_status}:${row.to_status}`;
-		assert.deepEqual(transitions.map(pair).sort(), selectTransitionsForMigration("0002").map(pair).sort());
+		assert.deepEqual(transitions.map(pair).sort(), [...selectTransitionsForMigration("0002"), ...selectTransitionsForMigration("0011")].map(pair).sort());
 		await sql`INSERT INTO projects (id) VALUES (${project}), (${otherProject})`;
 		await sql`INSERT INTO execution_policies (id, project_id, version, max_child_depth) VALUES (${randomUUID()}, ${project}, 1, 1)`;
 		await sql`INSERT INTO tasks (id, project_id, status, origin_type, depth) VALUES (${root}, ${project}, 'CREATED', 'owner', 0), (${third}, ${project}, 'CREATED', 'owner', 0), (${outsider}, ${otherProject}, 'CREATED', 'owner', 0)`;
@@ -33,7 +33,7 @@ it("enforces task transitions, hierarchy, dependencies and account rights", asyn
 		await sql`UPDATE tasks SET status = 'BLOCKED', block_kind = 'dependency', block_handler = 'chief_engineer' WHERE id = ${root}`;
 		await sql`UPDATE tasks SET block_handler = 'owner' WHERE id = ${root}`;
 		await assert.rejects(sql`UPDATE tasks SET block_handler = 'chief_engineer' WHERE id = ${root}`, /handler/i);
-		await assert.rejects(sql`UPDATE tasks SET status = 'PLANNING', block_kind = NULL, block_handler = NULL WHERE id = ${root}`, /blocked target/i);
+		await assert.rejects(sql`UPDATE tasks SET status = 'ASSIGNED', block_kind = NULL, block_handler = NULL WHERE id = ${root}`, /blocked target/i);
 		await assert.rejects(sql`UPDATE tasks SET status = 'READY', block_kind = NULL WHERE id = ${root}`, /block/i);
 		await sql`UPDATE tasks SET status = 'READY', block_kind = NULL, block_handler = NULL WHERE id = ${root}`;
 		await assert.rejects(sql`UPDATE tasks SET block_handler = 'owner' WHERE id = ${root}`, /block/i);
