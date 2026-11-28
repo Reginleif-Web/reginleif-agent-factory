@@ -19,7 +19,7 @@ operation takes an `executionId` created on the server; the adapter keeps its fa
 | `getStatus` | State (starting, running, exited, lost), usage so far, time of last output. Read only. |
 | `streamOutput` | Output chunks from a byte offset, so a restart or a retry resumes and never repeats. |
 | `cancel` | Idempotent. Stops the run by process identity (pid plus creation time), returns whether the end is confirmed; "not confirmed" keeps the task in CANCELLING until the machine confirms or the owner uses `force_close` (D21). The same kill by identity (the whole process tree of the `execution_id`) executes the `stop_run` order of the control component: a stop of one run, a stop of all runs of a project or of the factory, the end of a right held by a run's sandbox profile, and the critical reaction (one order for each live run of the agent; personnel.md, Critical). |
-| `collectResult` | Reads the execution folder, validates the report schema (below), computes usage, returns a result or a schema finding. |
+| `collectResult` | Reads the execution folder, validates the report schema (below), computes usage, returns the typed run outcome (machine contract 2: `collected`, `schemaFinding`, `died`, `limit` with the reset time, `question`, `unclear`, `review`, `settled`; temporal.md "Run outcome"). |
 | `cleanup` | Removes provider leftovers (temp, caches, supervisor job folder after upload). Never touches a worktree. |
 
 **Rights at start (G7, G13-G17, D31, governance.md "Rights").** `start` receives a profile that the server computes from
