@@ -133,7 +133,8 @@ export async function recordDecision(repo: Repo, input: DecisionInput): Promise<
         constraints: revision.constraints, changeReason: revision.change_reason })) throw new DecisionProblem('not_found', 404);
     }
     if (input.http) await tx.taskEvents.persist({ id: randomUUID(), taskId: input.taskId, correlationId: input.http.requestId,
-      dedupeKey: `decision:${decisionId}`, actorType: input.engineerRunId ? 'worker' : 'owner', actorId: input.actorId ?? null,
+      // Not `decision:<id>`: the workflow's decision_<kind> event owns that key, and a shared key made its persist a no-op (no transition event, no projection).
+      dedupeKey: `decision-recorded:${decisionId}`, actorType: input.engineerRunId ? 'worker' : 'owner', actorId: input.actorId ?? null,
       runId: input.engineerRunId, eventType: 'decision_recorded', payload: { decision_id: decisionId, kind: input.kind } });
     await audit('ok');
     return answer(result.decision, false);

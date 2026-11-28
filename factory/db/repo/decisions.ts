@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { and, asc, eq, exists, gt, inArray, isNull, or, sql, type SQL } from "drizzle-orm";
 import type { PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import { deviceSessions } from "../schema/device-sessions.ts";
@@ -159,15 +160,22 @@ export const taskEventRepo = (db: PostgresJsDatabase<any>) => ({
 	// With `projection` the task's row is brought to it in the same transaction as the event, only when the event is new
 	// (a replayed event already committed its projection). The status change is checked by the af_task_guard trigger, the
 	// activity writes no transition row.
+	// An event is identified by (task_id, dedupe_key), not by `id`: a workflow's uuid4 is not stable when a lost workflow task re-runs in
+	// another order, so the id can equal that of a different stored event. Such an event is stored under a fresh id; failing would be
+	// retried forever (the retry carries the same id) and leave the workflow stuck.
 	persist: async (event: typeof taskEvents.$inferInsert & { taskId: string; dedupeKey: string }, projection?: TaskProjection): Promise<typeof taskEvents.$inferSelect> => db.transaction(async (tx) => {
-		const inserted = (await tx.insert(taskEvents).values(event).onConflictDoNothing({ target: [taskEvents.taskId, taskEvents.dedupeKey] }).returning())[0];
+		let inserted = (await tx.insert(taskEvents).values(event).onConflictDoNothing().returning())[0];
 		if (inserted) {
 			if (projection) await projectTask(tx, event.taskId, projection);
 			return inserted;
 		}
 		const existing = (await tx.select().from(taskEvents).where(and(eq(taskEvents.taskId, event.taskId), eq(taskEvents.dedupeKey, event.dedupeKey))).limit(1))[0];
-		if (!existing) throw new Error("task event id conflicts with a different event");
-		return existing;
+		if (existing) return existing;
+		// The id belongs to a different event (same id, another dedupe key): store this one under a fresh id.
+		inserted = (await tx.insert(taskEvents).values({ ...event, id: randomUUID() }).onConflictDoNothing().returning())[0];
+		if (!inserted) throw new Error("task event could not be stored");
+		if (projection) await projectTask(tx, event.taskId, projection);
+		return inserted;
 	}),
 	stream: async ({ below, after, limit, taskId, runId, type }: { below: string; after?: { commitXid: string; seq: bigint }; limit?: number; taskId?: string; runId?: string; type?: string }) => {
 		const conditions = [sql`${taskEvents.commitXid} < ${below}::xid8`];
