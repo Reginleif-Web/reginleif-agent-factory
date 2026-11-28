@@ -19,6 +19,7 @@ import type { TaskState, UpdateKind } from "../workflows/task-state.ts";
 import { connectBench, createDatabaseBench } from "./database-bench.ts";
 import { ActivityError, MACHINE_ACTIVITY_NAMES } from "./fakes/contracts.ts";
 import { createMachineFakes, type MachineFakes } from "./fakes/machine-activities.ts";
+import { collected, reviewPass } from "./fakes/outcomes.ts";
 import { startTimeSkipping } from "./temporal/bench.ts";
 import { controlBundle, sendUpdate } from "./temporal/task-stub.ts";
 
@@ -34,6 +35,7 @@ const ids = (n: number): string => `28000000-0000-7000-8000-${String(n).padStart
 const owner = ids(1);
 const project = ids(2);
 const agent = ids(3);
+const reviewer = ids(4);
 const MACHINE = "m1";
 let counter = 100;
 const nextId = (): string => ids(counter++);
@@ -125,7 +127,7 @@ const controlActivities = (h: Harness) => {
 		void input;
 		return { chosen: { agentId: agent, workerId: MACHINE } } as Awaited<ReturnType<ControlActivities["SelectAgent"]>>;
 	};
-	const RequestReview = (async () => ({ kind: "reviewer", agentId: agent, provider: "test", existingReviewId: null })) as unknown as ControlActivities["RequestReview"];
+	const RequestReview = (async () => ({ kind: "reviewer", agentId: reviewer, provider: "reviewer-provider", existingReviewId: null })) as unknown as ControlActivities["RequestReview"];
 	return { ...real, SelectAgent, RequestReview };
 };
 
@@ -164,7 +166,12 @@ const until = async (handle: Handle, label: string, done: (state: TaskState) => 
 	assert.fail(`${label}: not reached, the last state was ${last?.status} (${JSON.stringify({ stopping: last?.stopping, pause: last?.pauseRequested, block: last?.blockKind })})`);
 };
 
-const monitorExits = (h: Harness): void => h.fakes.MonitorExecution.script({ outcome: { kind: "succeed", output: { state: "exited", logOffset: 0 } } });
+/** The implementer run and then the reviewer run of VERIFYING both end at once: a report, then a review that passes. */
+const monitorExits = (h: Harness): void => {
+	const exited = { outcome: { kind: "succeed", output: { state: "exited", logOffset: 0 } } } as const;
+	h.fakes.MonitorExecution.script(exited, exited);
+	h.fakes.CollectResults.script({ outcome: { kind: "succeed", output: collected() } }, { outcome: { kind: "succeed", output: reviewPass() } });
+};
 
 /** The workflow state and the tasks row agree on every column the projection carries. */
 const assertRowFollows = async (taskId: string, state: TaskState): Promise<Row> => {
@@ -185,7 +192,8 @@ before(async () => {
 	controlClient = connectBench(bench.controlUrl);
 	controlRepo = createRepo(drizzle(controlClient));
 	await migratorClient`INSERT INTO owners (id, name) VALUES (${owner}, 'active owner')`;
-	await migratorClient`INSERT INTO agents (id) VALUES (${agent})`;
+	// The review trigger demands another agent and another provider than the implementer's.
+	await migratorClient`INSERT INTO agents (id, provider) VALUES (${agent}, 'implementer-provider'), (${reviewer}, 'reviewer-provider')`;
 	await migratorRepo.projects.create({ id: project, name: "lifecycle-test", repositoryUrl: "https://example.invalid/repo.git", defaultBranch: "main", workspacePolicy: "worktree" });
 	// Every timeout 7 s (below the 10 s workflow task timeout); the limits fail closed at 0, so they are set: 3 runs a round, 2 rounds.
 	for (const key of allTimeoutKeys()) await migratorRepo.settings.set(key, 7, null);
@@ -222,7 +230,10 @@ describe("TaskWorkflow lifecycle", () => {
 		// The machine activities ran in the documented order, each when the tasks row (and the workflow) was in the state of its step.
 		const expected: [string, string][] = [
 			["PrepareWorkspace", "ASSIGNED"], ["StartAgentExecution", "ASSIGNED"], ["MonitorExecution", "RUNNING"], ["CollectResults", "RUNNING"],
-			["UploadResults", "RUNNING"], ["RunAutomatedChecks", "VERIFYING"], ["PublishArtifacts", "ACCEPTED"],
+			["UploadResults", "RUNNING"], ["RunAutomatedChecks", "VERIFYING"],
+			// The review of VERIFYING is a second run (the reviewer's) on the same machine, collected as a typed review outcome.
+			["StartAgentExecution", "VERIFYING"], ["MonitorExecution", "VERIFYING"], ["CollectResults", "VERIFYING"],
+			["PublishArtifacts", "ACCEPTED"],
 		];
 		assert.deepEqual(h.seen.filter((s) => s.name !== "SelectAgent").map((s) => [s.name, s.db]), expected);
 		for (const seen of h.seen) if (seen.wf !== null) assert.equal(seen.wf, seen.db, `${seen.name}: workflow and tasks row agree`);
@@ -231,8 +242,11 @@ describe("TaskWorkflow lifecycle", () => {
 		const publish = h.fakes.PublishArtifacts.calls()[0] as { branch: string; target: string };
 		assert.equal(publish.branch, `task/${h.taskId}`);
 		assert.equal(publish.target, "main");
-		for (const name of ["PrepareWorkspace", "StartAgentExecution", "CollectResults", "UploadResults", "RunAutomatedChecks", "PublishArtifacts"] as const) {
+		for (const name of ["PrepareWorkspace", "UploadResults", "RunAutomatedChecks", "PublishArtifacts"] as const) {
 			assert.equal(h.fakes[name].executed(), 1, `${name} ran once`);
+		}
+		for (const name of ["StartAgentExecution", "CollectResults"] as const) {
+			assert.equal(h.fakes[name].executed(), 2, `${name} ran twice: the implementer and the reviewer`);
 		}
 	});
 
@@ -336,7 +350,7 @@ describe("TaskWorkflow lifecycle", () => {
 			const parked = await until(handle, "awaiting approval", (s) => s.status === "AWAITING_APPROVAL");
 			await assertRowFollows(h.taskId, parked);
 		});
-		assert.equal(h.fakes.CollectResults.executed(), 1);
+		assert.equal(h.fakes.CollectResults.executed(), 2, "the implementer's run and the reviewer's");
 		assert.equal(h.fakes.StopExecution.executed(), 0);
 	});
 

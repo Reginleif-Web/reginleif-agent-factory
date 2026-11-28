@@ -66,7 +66,7 @@ export async function TaskWorkflow(input: TaskWorkflowInput): Promise<TaskState>
 		catalog = known;
 		const optionsOf = (name: ActivityName): LocalActivityOptions => {
 			const { S, C } = known.timeouts(name);
-			return { startToCloseTimeout: Math.round((S ?? 0) * 1000), scheduleToCloseTimeout: Math.round((C ?? 0) * 1000), retry: { nonRetryableErrorTypes: NON_RETRYABLE } };
+			return { ...(S === undefined ? {} : { startToCloseTimeout: Math.round(S * 1000) }), ...(C === undefined ? {} : { scheduleToCloseTimeout: Math.round(C * 1000) }), retry: { nonRetryableErrorTypes: NON_RETRYABLE } }; // a kind the catalog omits stays unset: zero would be a schedule-to-close timeout that fires at once
 		};
 		// Each proxy is read by name: a proxy has no own keys, so spreading one would copy nothing.
 		acts = {
@@ -81,6 +81,9 @@ export async function TaskWorkflow(input: TaskWorkflowInput): Promise<TaskState>
 			NotifyUser: proxyLocalActivities<Pick<ControlActivities, "NotifyUser">>(optionsOf("NotifyUser")).NotifyUser,
 			RequestReview: proxyLocalActivities<Pick<ControlActivities, "RequestReview">>(optionsOf("RequestReview")).RequestReview,
 			RecordRun: proxyLocalActivities<Pick<ControlActivities, "RecordRun">>(optionsOf("RecordRun")).RecordRun,
+			RecordReview: proxyLocalActivities<Pick<ControlActivities, "RecordReview">>(optionsOf("RecordReview")).RecordReview,
+			AskQuestionGate: proxyLocalActivities<Pick<ControlActivities, "AskQuestionGate">>(optionsOf("AskQuestionGate")).AskQuestionGate,
+			ChooseBlockHandler: proxyLocalActivities<Pick<ControlActivities, "ChooseBlockHandler">>(optionsOf("ChooseBlockHandler")).ChooseBlockHandler,
 		};
 		const bound = settings[HISTORY_MAX_EVENTS_KEY];
 		maxEvents = typeof bound === "number" && Number.isFinite(bound) && bound > 0 ? bound : null;

@@ -10,7 +10,9 @@ import { ReadDecision, type ReadDecisionInput } from "./read-decision.ts";
 import { RecordDecisionOutcome, type RecordDecisionOutcomeInput } from "./record-decision-outcome.ts";
 import { RecordRun, type RecordRunInput } from "./record-run.ts";
 import { RequestReview, type RequestReviewInput } from "./request-review.ts";
+import type { ChooseBlockHandlerInput } from "./block-handler.ts";
 import { ResolveDependencies } from "./resolve-dependencies.ts";
+import { AskQuestionGate, ChooseBlockHandler, RecordReview, type AskQuestionGateInput, type RecordReviewInput } from "./run-outcomes.ts";
 import { SelectAgent, type SelectAgentInput } from "./select-agent.ts";
 
 export { MachineLiveness, type MachineLivenessInput, type MachineLivenessResult } from "./machine-liveness.ts";
@@ -41,6 +43,10 @@ export const createControlActivities = (repo: Repo, db: PostgresJsDatabase<any>)
 	},
 	RequestReview: (input: RequestReviewInput) => RequestReview(db, input),
 	RecordRun: (input: RecordRunInput) => RecordRun(db, input),
+	// The typed run outcomes (temporal.md "Run outcomes"): the question gate, the block handler choice and the review record.
+	AskQuestionGate: (input: AskQuestionGateInput) => AskQuestionGate(repo, db, input),
+	ChooseBlockHandler: (input: Omit<ChooseBlockHandlerInput, "engineerAvailable">) => ChooseBlockHandler(input),
+	RecordReview: (input: RecordReviewInput) => RecordReview(db, input),
 });
 
 export type ControlActivities = ReturnType<typeof createControlActivities>;

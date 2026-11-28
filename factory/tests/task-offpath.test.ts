@@ -21,6 +21,7 @@ import { stateQuery } from "../workflows/task.ts";
 import type { TaskState, UpdateKind } from "../workflows/task-state.ts";
 import { connectBench, createDatabaseBench, jsonb } from "./database-bench.ts";
 import { ActivityError, MACHINE_ACTIVITY_NAMES } from "./fakes/contracts.ts";
+import { collected, reviewPass } from "./fakes/outcomes.ts";
 import { createMachineFakes, type MachineFakes } from "./fakes/machine-activities.ts";
 import { startTimeSkipping } from "./temporal/bench.ts";
 import { controlBundle, sendUpdate } from "./temporal/task-stub.ts";
@@ -185,6 +186,16 @@ const monitorExits = (h: Harness, times = 1): void => {
 	for (let i = 0; i < times; i += 1) h.fakes.MonitorExecution.script({ outcome: { kind: "succeed", output: { state: "exited", logOffset: 0 } } });
 };
 
+/**
+ * A run the review approves: `priorRuns` implementer runs ended before it (rework rounds), then this run, then the reviewer's run.
+ * Every run ends with one MonitorExecution exit and one collected report; the last CollectResults answer is the reviewer's pass.
+ */
+const approvedRun = (h: Harness, priorRuns = 0): void => {
+	monitorExits(h, priorRuns + 2);
+	for (let i = 0; i < priorRuns + 1; i += 1) h.fakes.CollectResults.script({ outcome: { kind: "succeed", output: collected() } });
+	h.fakes.CollectResults.script({ outcome: { kind: "succeed", output: reviewPass() } });
+};
+
 const checksResult = (h: Harness, status: "passed" | "failed" | "not_run"): void =>
 	h.fakes.RunAutomatedChecks.script({ outcome: { kind: "succeed", output: { checkId: "unit", status, exitCode: status === "not_run" ? null : status === "passed" ? 0 : 1, logRef: "log-1" } } });
 
@@ -255,7 +266,7 @@ describe("review-provider: the reviewer is another provider (D20)", () => {
 	test("the pick skips the implementer's provider and takes the first eligible agent of another provider", async () => {
 		await limits({});
 		const h = await harness();
-		monitorExits(h);
+		approvedRun(h);
 		await withWorkers(h, async () => {
 			const handle = await startLifecycle(h);
 			await until(handle, "awaiting approval", (s) => s.status === "AWAITING_APPROVAL");
@@ -264,13 +275,16 @@ describe("review-provider: the reviewer is another provider (D20)", () => {
 		assert.ok(started, "review_started was written");
 		assert.equal(started.payload.agentId, reviewerB, "the same-provider agent was skipped, the lowest id of another provider chosen");
 		const runs = await migratorClient`SELECT role, agent_id FROM task_runs WHERE task_id = ${h.taskId}`;
-		assert.ok(runs.length > 0 && runs.every((r) => r.role === "implementer" && r.agent_id === agent), "the workflow recorded its runs as implementer runs of the routed agent");
+		const implementer = runs.filter((r) => r.role === "implementer");
+		assert.ok(implementer.length > 0 && implementer.every((r) => r.agent_id === agent), "the implementer runs belong to the routed agent");
+		const reviewer = runs.filter((r) => r.role === "reviewer");
+		assert.deepEqual(reviewer.map((r) => r.agent_id), [reviewerB], "the reviewer's run is recorded for the picked reviewer, not the implementer");
 	});
 
 	test("no reviewer of another provider: BLOCKED check_environment (review_unavailable); once one is enabled, retry reaches review", async () => {
 		await limits({});
 		const h = await harness();
-		monitorExits(h);
+		approvedRun(h);
 		await migratorClient`UPDATE agents SET enabled = false WHERE id IN (${reviewerB}, ${reviewerC})`;
 		try {
 			await withWorkers(h, async () => {
@@ -297,7 +311,7 @@ describe("state-exit: BLOCKED kinds enter and leave through their exits", () => 
 	test("execution block: the row shows kind and handler; call_owner hands it to the owner; the owner's retry runs again", async () => {
 		await limits({ infraMax: 1 });
 		const h = await harness();
-		monitorExits(h);
+		approvedRun(h);
 		h.fakes.StartAgentExecution.script({ outcome: { kind: "fail", error: "HeartbeatTimeout" } });
 		await withWorkers(h, async () => {
 			const handle = await startLifecycle(h);
@@ -325,7 +339,7 @@ describe("state-exit: BLOCKED kinds enter and leave through their exits", () => 
 	test("rework_limit: the round limit blocks the third failed review, and the owner raises the limit to leave", async () => {
 		await limits({ reworkMax: 2 });
 		const h = await harness();
-		monitorExits(h, 4);
+		approvedRun(h, 3);
 		for (let i = 0; i < 3; i += 1) checksResult(h, "failed");
 		await withWorkers(h, async () => {
 			const handle = await startLifecycle(h);
@@ -375,14 +389,14 @@ describe("role-rights: the workflow gives runs no role; only the chief engineer'
 	test("the recorded runs hold no role, and a role right reaches the assigned participant only", async () => {
 		await limits({});
 		const h = await harness();
-		monitorExits(h);
+		approvedRun(h);
 		await withWorkers(h, async () => {
 			const handle = await startLifecycle(h);
 			await until(handle, "awaiting approval", (s) => s.status === "AWAITING_APPROVAL");
 		});
 		const repo = controlRepo;
 		const runs = await migratorClient`SELECT role, participant FROM task_runs WHERE task_id = ${h.taskId}`;
-		assert.ok(runs.length > 0 && runs.every((r) => r.role === "implementer" && r.participant === null));
+		assert.ok(runs.length > 0 && runs.every((r) => (r.role === "implementer" || r.role === "reviewer") && r.participant === null));
 		assert.equal((await migratorClient`SELECT 1 FROM role_assignments WHERE task_id = ${h.taskId}`).length, 0, "the workflow assigns no role");
 		assert.equal(await repo.transaction((tx) => roleForParticipant(tx, h.taskId, "builder")), undefined);
 

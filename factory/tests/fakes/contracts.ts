@@ -3,8 +3,10 @@
 // are inferred from them. The production activity modules do not exist yet; when they do, this file moves next to them.
 import { z } from "zod";
 
-/** Version of these contracts, carried in every activity input (temporal.md, Migrations). 1 is the first version. */
-export const CONTRACT_VERSION = 1;
+import { CONTRACT_VERSION } from "../../contracts/contract-version.ts";
+
+/** Version of these contracts, carried in every activity input (temporal.md, Migrations): one constant, shared with the workflow. */
+export { CONTRACT_VERSION };
 
 /**
  * Error kinds of temporal.md "Retry classes", with their class. `infra`, `workerLost` and `external` are retried by Temporal
@@ -79,13 +81,31 @@ export const AgentReport = z.strictObject({
 	finalStatus: z.enum(["done", "partial", "failed"]),
 	/** Only a planner run fills it: the child task proposals CreateChildTasks takes (temporal.md "Planning"). */
 	proposals: z.array(z.strictObject({ id: ref, title: z.string(), requirements: z.string(), covers: z.array(z.string()) })).optional(),
+	/** Only an implementer's rework run fills it: one answer per defect the review found (temporal.md "Review findings", D25). */
+	findingAnswers: z.array(z.strictObject({ key: ref, answer: z.enum(["accepted", "disputed"]), scope: z.enum(["technical", "requirements"]), reason: z.string() })).optional(),
 });
 
-/** Result of CollectResults and of the adapter's collectResult: a report, or a schema finding that is data, not an error. */
+/** A finding of a reviewer run: `key` is stable within the review, `kind` decides whether it blocks (D25). */
+export const ReviewFinding = z.strictObject({ key: ref, kind: z.enum(["defect", "requirement_change", "suggestion"]), text: z.string() });
+
+/**
+ * Result of CollectResults and of the adapter's collectResult (contract 2). A report or a schema finding, and the typed outcomes
+ * of a run that did not simply finish; every one is data, not an error (temporal.md "Retry classes"):
+ * died: the agent process ended without a report; limit: the provider's usage limit, `waitSeconds` until its reset is computed by
+ * the machine (null: unknown), so the workflow needs no clock; question: the agent asked the owner (the inquiry is the registry's, G9);
+ * unclear: the run ended and the worker cannot tell how; review and settled: the results of a reviewer run and of a settling reviewer run.
+ */
 export const CollectOutcome = z.discriminatedUnion("status", [
 	z.strictObject({ status: z.literal("collected"), report: AgentReport }),
 	z.strictObject({ status: z.literal("schemaFinding"), findings: z.array(z.string()) }),
+	z.strictObject({ status: z.literal("died"), reason: z.string() }),
+	z.strictObject({ status: z.literal("limit"), waitSeconds: nonNegInt.nullable() }),
+	z.strictObject({ status: z.literal("question"), question: ref, inquiryId: ref, tokenId: ref, sessionRef: ref }),
+	z.strictObject({ status: z.literal("unclear"), reason: z.string() }),
+	z.strictObject({ status: z.literal("review"), verdict: z.enum(["pass", "fail", "inconclusive"]), findings: z.array(ReviewFinding) }),
+	z.strictObject({ status: z.literal("settled"), outcomes: z.array(z.strictObject({ key: ref, outcome: z.enum(["confirmed", "dismissed"]), reason: z.string() })) }),
 ]);
+export type CollectOutcomeValue = z.infer<typeof CollectOutcome>;
 
 type Schema = z.ZodType;
 

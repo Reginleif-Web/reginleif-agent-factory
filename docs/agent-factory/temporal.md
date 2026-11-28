@@ -50,7 +50,7 @@ Main path by state (all moves follow the architecture's table; each arrow is one
    VERIFYING (or PAUSED if `pauseRequested`); `died` starts a new attempt in the same worktree within `attempt.max` and
    budget limits (ASSIGNED, D16); `unclear` goes to BLOCKED `execution` after the read-only inspection settles nothing;
    `limit` to BLOCKED `usage_limit`; `question` to BLOCKED `agent_question` after the question gate (below); a
-   non-retryable error to FAILED.
+   non-retryable error to FAILED. The outcome is a typed value of `CollectResults` (below), not an exception.
 7. VERIFYING: `RunAutomatedChecks`, then `RequestReview` (picks a reviewer of another provider than the implementer, D20;
    the review run is the same activities). Pass goes to AWAITING_APPROVAL; confirmed findings to REWORK_REQUIRED;
    `rework.maxRounds` reached to BLOCKED `rework_limit`. Details below. Input no attempt can make valid goes to FAILED.
@@ -58,6 +58,28 @@ Main path by state (all moves follow the architecture's table; each arrow is one
    with the second press of D23 already recorded where the publication is the owner's (G15).
 9. After a final state the workflow completes. `CleanupWorkspace` runs only through the owner's cleanup command or the chief engineer's grant (D24, G15),
    delivered as an outbox row of kind `cleanup`; nothing runs by itself.
+
+### Run outcome (machine contract 2)
+
+`CollectResults` returns one value, a union on `status`; the contract validator refuses any other shape, so a worker that
+invents an outcome fails at the boundary, not inside the workflow.
+
+| `status` | Carries | Workflow handler |
+|---|---|---|
+| `collected` | the agent's report (final status, summary, `findingAnswers` for an open review) | `UploadResults`, then VERIFYING; a failed final status counts as `died` |
+| `schemaFinding` | the report's schema problems | recorded as a finding, the run counts as `died` |
+| `died` | reason | `attempts_exhausted` check: a new attempt (ASSIGNED) within `attempt.max`, then BLOCKED `execution` |
+| `unclear` | reason | BLOCKED `execution` at once |
+| `limit` | `waitSeconds` or null | known and within `limit.maxWait`: one `usage_limit_wait` notice, a durable timer to the reset, the same run again; otherwise BLOCKED `usage_limit` |
+| `question` | question, inquiry id, token id, session ref | `AskQuestionGate`; a gated question that does not pass returns to the agent while attempts remain; else BLOCKED `agent_question` |
+| `review` | verdict `pass`, `fail` or `inconclusive`, findings | review run only: see below |
+| `settled` | per disputed finding `confirmed` or `dismissed` | settling run only: see below |
+
+Every run is recorded by `RecordRun` (by execution id, so a replay writes it once) with its status and error code; a
+review or settling run is a `reviewer` run with no attempt number. `RecordReview` writes the review row, the finding
+answers and the settling outcomes. `ChooseBlockHandler` decides the owner notice of a block (owner-handled kinds raise one
+`task_blocked` notice; chief-engineer kinds raise none). The contract version is 2; a machine of version 1 is still accepted
+(current and previous, api.md).
 
 ### Verification, review and mandatory checks (D20, D25, D26)
 
@@ -79,6 +101,9 @@ Main path by state (all moves follow the architecture's table; each arrow is one
   `confirmed` or `dismissed`, and that is final. A dispute about requirements, scope or cost goes to the owner as BLOCKED
   `scope`. A `requirement_change` or `suggestion` never blocks acceptance: it becomes a proposal row for the owner.
   Confirmed findings send the task to REWORK_REQUIRED, bounded by `rework.maxRounds`.
+  The review is a run of the `review` outcome; the settling run returns `settled`. A technical dispute is settled once; all
+  dismissed goes on to VERIFYING, a confirmed one to REWORK_REQUIRED (or BLOCKED `rework_limit` at the bound). The answers and the
+  outcomes are rows of `review_finding_outcomes` (`accepted`, `disputed`, `confirmed`, `dismissed`, `owner`).
 
 ## Retry classes (spec 5.5)
 
@@ -92,7 +117,7 @@ infrastructure faults. A new agent attempt is a workflow loop bounded by `attemp
 | `workerLost` | yes, same machine queue; first step is a lookup | heartbeat timeout | BLOCKED `execution` |
 | `agentDied` | no; workflow loop | outcome `died` | BLOCKED `execution` after `attempt.max` |
 | `unclear` | no | outcome `unclear` | BLOCKED `execution` at once, after the inspection |
-| `usageLimit` | no; workflow sleeps until the reset time when known (`limit.maxWait`) | outcome `limit` | BLOCKED `usage_limit` |
+| `usageLimit` | no; workflow sleeps until the reset time when known (`limit.maxWait`), a durable timer, then runs again | outcome `limit` | BLOCKED `usage_limit` |
 | `invalid` | no | `ValidationError`, `PermissionDenied`, `BudgetExceeded`, `BadInput` (non-retryable) | FAILED when no attempt can make the input valid (only in PLANNING, RUNNING and VERIFYING); otherwise BLOCKED `execution` (permission, budget) or `scope` |
 | `external` | only after checking the target by idempotency key | `PublishFailed` | BLOCKED `execution` |
 | `physical` (D34) | **never**: maximum attempts 1, no activity or workflow retry | a command to a robot, a stop request, a lease change | an unknown outcome is BLOCKED `physical_unknown`; a refusal by the runtime is a typed result, not an error |
@@ -220,12 +245,16 @@ Worker sets `enableNonLocalActivities: false` and workflow code reaches these st
 | `NotifyUser` | local, writes a notice via API; Telegram client delivers | notice key | S C | infra | none | none (a lost notice is shown in the client) |
 | `CreateChildTasks` | local | origin task + proposal id | S C | infra | depth, count, budget, scope limit | the proposal stays `open` for the owner |
 | `RequestReview` | local (selects reviewer, creates review record) | task + round | S C | infra | no agent of another provider | BLOCKED `check_environment` |
+| `RecordRun` | local | execution id | S C | infra | none | none; an upsert by execution id |
+| `RecordReview` | local | review id (step `review`, `answers` or `settled`) | S C | infra | the review-independence trigger refuses a same-agent or same-provider review | BLOCKED `check_environment` |
+| `AskQuestionGate` | local | task + inquiry id | S C | infra | registry search unavailable: the gate fails open | none; the result picks BLOCKED `agent_question` or a return to the agent |
+| `ChooseBlockHandler` | local, pure | block kind + cause | S | infra | none | none; decides the owner notice |
 | `PrepareWorkspace` | `machine-<id>` | execution id | S Q C | workerLost | repo missing, dirty base | BLOCKED `execution` |
 | `InspectWorkspace` | machine | read only | S Q | workerLost | none | BLOCKED `execution` |
 | `StartAgentExecution` | machine | execution id (intent file first) | S Q C | workerLost | `invalid` | BLOCKED `execution` |
 | `MonitorExecution` | machine | execution id | S Q H | workerLost | none; returns outcome | per outcome |
 | `StopExecution` | machine | execution id | S Q C | workerLost | none | stays CANCELLING, notice |
-| `CollectResults` | machine | execution id | S Q C | workerLost | report schema invalid becomes a finding, not an error | REWORK_REQUIRED or BLOCKED `execution` |
+| `CollectResults` | machine | execution id | S Q C | workerLost | returns the typed run outcome (contract 2); a report schema invalid becomes a `schemaFinding`, not an error | per outcome, see Run outcome |
 | `UploadResults` | machine, via API | execution id + file hash | S Q C | infra | none | BLOCKED `execution`; files stay on the machine |
 | `RunAutomatedChecks` | machine (also H when a check is long) | execution id + check id | S Q H | workerLost | tool missing becomes `not_run` | repair run (D26), then BLOCKED `check_environment` |
 | `PublishArtifacts` | machine (credentials stay with the worker) | branch + target, checked first | S Q C | external | `invalid` | BLOCKED `execution` |
@@ -460,7 +489,8 @@ continuation`.
 - Replay of saved histories (one per state path, from integration tests) runs against new code by hand before a release
   (there is no CI, see testing.md); a failed replay stops the release.
 - A release that cannot replay a running task keeps its workers online until it finishes or rolls over. The contract
-  version is in every activity input; an older machine gets no work (architecture, Migrations).
+  version is in every activity input (now 2: the typed `CollectResults` outcome); a machine outside the current and previous version gets
+  no work (architecture, Migrations).
 
 ## Open, decided in its phase
 

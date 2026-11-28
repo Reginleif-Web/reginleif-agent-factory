@@ -220,7 +220,9 @@ limit. The result therefore exists without the worker and without the `rig exec`
    retry attaches to the same execution.
 3. `CollectResults` reads the worker's own execution folder. `rig exec` keeps only 50 runs for the whole machine, so its
    log is used for liveness and diagnosis, not as the result. A started marker with no exit and a pruned record means the
-   run ended; the marker and the exit file are the proof, not the record.
+   run ended; the marker and the exit file are the proof, not the record. `CollectResults` returns a typed outcome
+   (contract 2; temporal.md "Run outcome"), so the workflow reaches the usage-limit wait, the question gate and the review
+   handlers from the result, not from an error.
 
 Because the runner holds the time limit, an agent without a server stops by itself. Without a connection the worker starts
 nothing new and decides nothing that needs the server. Results and logs go to the server through the API into a file

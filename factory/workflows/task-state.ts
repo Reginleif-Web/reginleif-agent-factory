@@ -101,6 +101,13 @@ export interface TaskState {
 	readonly selectionSeq: number;
 	/** The last run's execution id, kept after `executionId` is cleared: the publish after ACCEPTED goes to that run's machine. */
 	readonly lastExecutionId: string | null;
+	/**
+	 * The review whose defects the next implementer run must answer (D25): the review row id, the keys of its defect findings and the
+	 * reviewer agent (the settling run of a dispute goes to the same reviewer).
+	 * Set when a failed review sends the task to REWORK_REQUIRED, cleared when the answers are recorded. JSON-plain. A state carried
+	 * from before this field existed lacks it (read as null).
+	 */
+	readonly openReview: { readonly reviewId: string; readonly keys: readonly string[]; readonly reviewerId: string } | null;
 }
 
 /** The start argument of the workflow (`[{taskId}]`); `carried` is set only by Continue-As-New. */
@@ -139,5 +146,5 @@ export const initialState = (taskId: string): TaskState => ({
 	allowedAgents: [], dependencyIds: [], childIds: [], handled: {}, settings: null,
 	regulationVersionId: null, budgetUsed: 0, contractVersion: CONTRACT_VERSION,
 	agentId: null, eventSeq: 0, noAgentNoticeAttempt: null, runOutcome: null, attemptsInRound: 0, selectionSeq: 0,
-	lastExecutionId: null,
+	lastExecutionId: null, openReview: null,
 });
